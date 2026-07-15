@@ -43,13 +43,22 @@ namespace AIBridge.Agent
 
         public static AgentSessionState LoadSession()
         {
-            return LoadWithBackup<AgentSessionState>(SessionPath);
+            AgentSessionState state = LoadWithBackup<AgentSessionState>(SessionPath);
+            if (state != null && state.schemaVersion < 2)
+            {
+                // v1 没有 requireApiKey。升级中的远程会话按安全默认值处理，防止
+                // Domain Reload 后因内存凭据丢失而发送空值或旧密文。
+                state.requireApiKey = !string.Equals(state.provider, "openai-compatible", StringComparison.OrdinalIgnoreCase) &&
+                                      !IsLoopbackUrl(state.apiUrl);
+                state.schemaVersion = 2;
+            }
+            return state;
         }
 
         public static void SaveSession(AgentSessionState state)
         {
             if (state == null) return;
-            state.schemaVersion = 1;
+            state.schemaVersion = 2;
             state.revision++;
             state.updatedUtcTicks = DateTime.UtcNow.Ticks;
             SaveObject(SessionPath, state);
@@ -192,6 +201,14 @@ namespace AIBridge.Agent
             if (handler == null) return;
             try { handler(); }
             catch { }
+        }
+
+        private static bool IsLoopbackUrl(string url)
+        {
+            url = (url ?? "").Trim().ToLowerInvariant();
+            return url.StartsWith("http://localhost") || url.StartsWith("https://localhost") ||
+                   url.StartsWith("http://127.0.0.1") || url.StartsWith("https://127.0.0.1") ||
+                   url.StartsWith("http://[::1]") || url.StartsWith("https://[::1]");
         }
     }
 }

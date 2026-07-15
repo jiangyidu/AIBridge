@@ -79,6 +79,13 @@ namespace AIBridge.Agent
                 return false;
             }
 
+            config.apiKey = AgentEncryptionUtility.NormalizeApiKey(config.apiKey);
+            if (config.requireApiKey && string.IsNullOrEmpty(config.apiKey))
+            {
+                error = "当前远程服务需要 API Key。请展开“配置”，重新输入有效密钥后再发送。";
+                return false;
+            }
+
             DisposeLlmOperation();
             _inMemoryApiKey = config.apiKey ?? "";
 
@@ -90,6 +97,7 @@ namespace AIBridge.Agent
             state.provider = config.provider ?? "";
             state.apiUrl = config.apiUrl ?? "";
             state.model = config.model ?? "";
+            state.requireApiKey = config.requireApiKey;
             state.language = config.language ?? "zh";
             state.userSystemPrompt = config.userSystemPrompt ?? "";
             state.unityVersion = Application.unityVersion;
@@ -249,7 +257,13 @@ namespace AIBridge.Agent
 
             try
             {
-                _llmOperation = AgentLlmClient.Start(_state, ResolveApiKey());
+                string apiKey = ResolveApiKey();
+                if (_state.requireApiKey && string.IsNullOrEmpty(apiKey))
+                {
+                    Fail("当前远程服务的 API Key 为空或本地密钥已无法解密。请展开“配置”，重新输入有效密钥后再发送。不会自动重试。");
+                    return;
+                }
+                _llmOperation = AgentLlmClient.Start(_state, apiKey);
             }
             catch (Exception ex)
             {
@@ -271,7 +285,10 @@ namespace AIBridge.Agent
             DisposeLlmOperation();
             if (!response.success)
             {
-                ScheduleLlmRetry(response.error);
+                if (response.retryable)
+                    ScheduleLlmRetry(response.error);
+                else
+                    Fail(BuildNonRetryableLlmError(response));
                 return;
             }
 
@@ -447,6 +464,23 @@ namespace AIBridge.Agent
             AgentStateStore.AppendHistory("system", "[网络重试] " + reason, "");
         }
 
+        private static string BuildNonRetryableLlmError(AgentLlmResponse response)
+        {
+            string provider = string.IsNullOrEmpty(_state.provider) ? "远程 API" : _state.provider;
+            if (response.failureKind == "Authentication")
+            {
+                return "API 认证失败（HTTP " + response.statusCode + "）。当前服务商：" + provider +
+                       "，接口：" + _state.apiUrl + "。请展开“配置”，删除旧值后重新粘贴该服务商签发的有效 API Key。" +
+                       "认证错误不会自动重试。";
+            }
+            if (response.failureKind == "Billing")
+                return "API 账户余额或额度不足（HTTP 402）。请检查 " + provider + " 账户后重试；本错误不会自动重试。";
+            if (response.failureKind == "InvalidRequest")
+                return "LLM 请求配置无效。服务商：" + provider + "，模型：" + _state.model +
+                       "，接口：" + _state.apiUrl + "。" + response.error + "；本错误不会自动重试。";
+            return response.error + "；该错误不会自动重试。";
+        }
+
         private static void CancelNow()
         {
             DisposeLlmOperation();
@@ -472,8 +506,10 @@ namespace AIBridge.Agent
 
         private static string ResolveApiKey()
         {
-            if (!string.IsNullOrEmpty(_inMemoryApiKey)) return _inMemoryApiKey;
-            return AgentEncryptionUtility.Decrypt(EditorPrefs.GetString("AIAss_Api_Key", ""));
+            if (!string.IsNullOrEmpty(_inMemoryApiKey))
+                return AgentEncryptionUtility.NormalizeApiKey(_inMemoryApiKey);
+            return AgentEncryptionUtility.NormalizeApiKey(
+                AgentEncryptionUtility.Decrypt(EditorPrefs.GetString("AIAss_Api_Key", "")));
         }
 
         private static string AddOperationId(string argumentsJson, string operationId)

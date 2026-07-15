@@ -12,6 +12,14 @@ The transaction preserves the original errors, restores the prior source, and wa
 
 This is expected. A request object cannot survive an AppDomain rebuild. The host retries the same logical decision up to three times, then stops rather than loop forever.
 
+## HTTP 401 / 403 authentication failure
+
+Authentication failures are permanent for the current configuration, so the Agent stops immediately without retrying. Open the AI Assistant configuration, verify that the provider and endpoint match, remove the old value, and paste a valid key issued by that provider. Do not include an API URL, a `Bearer ` prefix, quotes, or a key from another provider.
+
+Before a session starts, the key is stored in EditorPrefs using versioned AES encryption so it can be recovered after Domain Reload. Legacy ciphertext that cannot be decrypted safely is never sent and must be re-entered. The key is not written to the Agent state under `Library/AIBridge`.
+
+HTTP 402 and invalid request/model errors also stop immediately. Only timeouts, 429 responses, and server-side 5xx failures use bounded backoff retries.
+
 ## Tool returned `Uncertain`
 
 The reload occurred across an ordinary tool's execution/commit boundary. The tool is not replayed. Inspect current scene or asset state before compensating.

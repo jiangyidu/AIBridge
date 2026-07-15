@@ -57,7 +57,7 @@ namespace AIBridge.Agent
     [Serializable]
     public sealed class AgentSessionState
     {
-        public int schemaVersion = 1;
+        public int schemaVersion = 2;
         public string sessionId = "";
         public bool active;
         public bool cancelRequested;
@@ -67,6 +67,7 @@ namespace AIBridge.Agent
         public string provider = "";
         public string apiUrl = "";
         public string model = "";
+        public bool requireApiKey;
         public string language = "zh";
         public string userSystemPrompt = "";
         public string unityVersion = "";
@@ -91,6 +92,7 @@ namespace AIBridge.Agent
         public string provider = "";
         public string apiUrl = "";
         public string apiKey = "";
+        public bool requireApiKey;
         public string model = "";
         public string language = "zh";
         public string userSystemPrompt = "";

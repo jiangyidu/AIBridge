@@ -78,6 +78,7 @@ namespace AIBridge.Agent
         private LLMMode _mode = LLMMode.RemoteAPI;
         private APIProvider _provider = APIProvider.DeepSeek;
         private string _apiKey = "";
+        private bool _apiKeyNeedsReentry;
         private string _baseUrl = "";
         private string _modelName = "";
         private string _ollamaUrl = "http://localhost:11434";
@@ -350,7 +351,18 @@ namespace AIBridge.Agent
                 GUILayout.Space(16);
 
                 EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
-                _apiKey = DrawPasswordRow(AgentLocalization.Get("config_api_key", "接口密钥"), _apiKey);
+                string nextApiKey = DrawPasswordRow(AgentLocalization.Get("config_api_key", "接口密钥"), _apiKey);
+                if (nextApiKey != _apiKey)
+                {
+                    _apiKey = nextApiKey;
+                    _apiKeyNeedsReentry = false;
+                }
+                if (_apiKeyNeedsReentry)
+                {
+                    EditorGUILayout.HelpBox(
+                        "旧 API Key 无法安全解密，已阻止发送。请删除旧值并重新粘贴有效密钥。",
+                        MessageType.Error);
+                }
                 DrawMaxStepRow();
                 DrawServiceRow();
                 EditorGUILayout.EndVertical();
@@ -1101,6 +1113,18 @@ namespace AIBridge.Agent
                 return;
             }
 
+            // API Key 不进入可持久化 Agent 状态；启动前必须先安全写入 EditorPrefs，
+            // 这样生成脚本触发 Domain Reload 后才能恢复同一凭据。
+            _apiKey = AgentEncryptionUtility.NormalizeApiKey(_apiKey);
+            SavePrefs();
+            if (_mode == LLMMode.RemoteAPI && !string.IsNullOrEmpty(_apiKey) && _apiKeyNeedsReentry)
+            {
+                AddMessage("assistant", "C# Agent 启动失败：当前 API Key 无法安全保存，已阻止请求。请重新输入密钥或检查 Unity EditorPrefs 写入权限。");
+                SaveHistory();
+                Repaint();
+                return;
+            }
+
             AddMessage("user", text);
             SaveHistory();
 
@@ -1131,6 +1155,7 @@ namespace AIBridge.Agent
             AgentSessionConfig data = new AgentSessionConfig();
             data.apiUrl = GetCurrentApiUrl();
             data.apiKey = _mode == LLMMode.Ollama ? "" : _apiKey;
+            data.requireApiKey = _mode == LLMMode.RemoteAPI && _provider != APIProvider.Custom;
             data.model = _mode == LLMMode.Ollama ? _ollamaModel : _modelName;
             data.provider = _mode == LLMMode.Ollama ? "openai-compatible" : ProviderNames[(int)_provider];
             data.userSystemPrompt = _userSystemPrompt ?? "";
@@ -1327,8 +1352,23 @@ namespace AIBridge.Agent
                 _showReasoning,
                 _allowGeneratedCodeExecution);
 
-            // API key is stored securely using AES encryption in EditorPrefs
-            EditorPrefs.SetString("AIAss_Api_Key", AgentEncryptionUtility.Encrypt(_apiKey));
+            // API key is stored securely using versioned AES encryption in EditorPrefs.
+            string normalizedKey = AgentEncryptionUtility.NormalizeApiKey(_apiKey);
+            string encryptedKey = AgentEncryptionUtility.Encrypt(normalizedKey);
+            if (string.IsNullOrEmpty(normalizedKey))
+            {
+                EditorPrefs.SetString("AIAss_Api_Key", "");
+                _apiKeyNeedsReentry = false;
+            }
+            else if (!string.IsNullOrEmpty(encryptedKey))
+            {
+                EditorPrefs.SetString("AIAss_Api_Key", encryptedKey);
+                _apiKeyNeedsReentry = false;
+            }
+            else
+            {
+                _apiKeyNeedsReentry = true;
+            }
         }
 
         private void LoadPrefs()
@@ -1345,7 +1385,24 @@ namespace AIBridge.Agent
             _showReasoning = settings.ShowReasoning;
             _allowGeneratedCodeExecution = settings.AllowGeneratedCodeExecution;
 
-            _apiKey = AgentEncryptionUtility.Decrypt(EditorPrefs.GetString("AIAss_Api_Key", ""));
+            string storedKey = EditorPrefs.GetString("AIAss_Api_Key", "");
+            bool shouldRewrite;
+            if (AgentEncryptionUtility.TryDecrypt(storedKey, out _apiKey, out shouldRewrite))
+            {
+                _apiKey = AgentEncryptionUtility.NormalizeApiKey(_apiKey);
+                _apiKeyNeedsReentry = false;
+                if (shouldRewrite && !string.IsNullOrEmpty(_apiKey))
+                {
+                    string migrated = AgentEncryptionUtility.Encrypt(_apiKey);
+                    if (!string.IsNullOrEmpty(migrated))
+                        EditorPrefs.SetString("AIAss_Api_Key", migrated);
+                }
+            }
+            else
+            {
+                _apiKey = "";
+                _apiKeyNeedsReentry = !string.IsNullOrEmpty(storedKey);
+            }
         }
     }
 }

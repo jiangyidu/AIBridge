@@ -18,6 +18,14 @@
 
 这是预期现象。网络对象不能跨 AppDomain 保存，系统会按同一逻辑决策最多重试 3 次。达到上限后会停止会话，避免无限请求。
 
+## HTTP 401 / 403：API 认证失败
+
+这不是可恢复的网络错误，Agent 会立即停止且不会重复请求。展开 AI Assistant 的“配置”，确认服务商和接口地址匹配，然后删除旧值并重新粘贴该服务商签发的有效 API Key。不要填写 API 地址、`Bearer ` 前缀、引号或其他服务商的 Key。
+
+API Key 会在会话启动前以带版本标识的 AES 格式写入 EditorPrefs，确保 Domain Reload 后仍能恢复；无法安全解密的旧密文会被阻止发送并要求重新输入。Key 不会写入 `Library/AIBridge` 的 Agent 状态文件。
+
+HTTP 402、无效参数或无效模型同样不会盲目重试；超时、429 和 5xx 才会进行有限退避重试。
+
 ## 工具返回 Uncertain
 
 普通工具在执行提交边界遇到重载，系统无法证明它是否已经产生副作用，因此不会自动重放。让 Agent 重新调用 `query_scene`、`query_object` 或 `find_assets` 检查现状。

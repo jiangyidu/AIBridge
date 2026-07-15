@@ -9,6 +9,9 @@ namespace AIBridge.Agent
     public sealed class AgentLlmResponse
     {
         public bool success;
+        public bool retryable;
+        public long statusCode;
+        public string failureKind = "";
         public string content = "";
         public string reasoningContent = "";
         public string error = "";
@@ -45,6 +48,8 @@ namespace AIBridge.Agent
             AgentLlmResponse result = new AgentLlmResponse();
             if (!IsDone)
             {
+                result.retryable = true;
+                result.failureKind = "Pending";
                 result.error = "LLM 请求尚未完成";
                 return result;
             }
@@ -59,8 +64,10 @@ namespace AIBridge.Agent
             string responseText = _request.downloadHandler == null ? "" : _request.downloadHandler.text;
             if (failed)
             {
-                result.error = "HTTP " + _request.responseCode + ": " + (_request.error ?? "请求失败") +
-                               (string.IsNullOrEmpty(responseText) ? "" : "\n" + Limit(responseText, 4000));
+                result.statusCode = _request.responseCode;
+                result.retryable = IsRetryableFailure(result.statusCode);
+                result.failureKind = ClassifyFailure(result.statusCode);
+                result.error = BuildHttpError(result.statusCode, _request.error, responseText);
                 return result;
             }
 
@@ -70,9 +77,43 @@ namespace AIBridge.Agent
             }
             catch (Exception ex)
             {
+                result.failureKind = "InvalidResponse";
+                result.retryable = false;
                 result.error = "无法解析 LLM 响应: " + ex.Message + "\n" + Limit(responseText, 4000);
                 return result;
             }
+        }
+
+        private static bool IsRetryableFailure(long statusCode)
+        {
+            return statusCode <= 0 || statusCode == 408 || statusCode == 409 ||
+                   statusCode == 425 || statusCode == 429 || statusCode >= 500;
+        }
+
+        private static string ClassifyFailure(long statusCode)
+        {
+            if (statusCode == 401 || statusCode == 403) return "Authentication";
+            if (statusCode == 402) return "Billing";
+            if (statusCode == 408) return "Timeout";
+            if (statusCode == 429) return "RateLimit";
+            if (statusCode >= 500) return "Server";
+            if (statusCode >= 400) return "InvalidRequest";
+            return "Network";
+        }
+
+        private static string BuildHttpError(long statusCode, string transportError, string responseText)
+        {
+            if (statusCode == 401 || statusCode == 403)
+                return "HTTP " + statusCode + "：API 认证失败，服务端拒绝了当前密钥";
+            if (statusCode == 402)
+                return "HTTP 402：API 账户余额或额度不足";
+            if (statusCode == 429)
+                return "HTTP 429：API 请求过于频繁，稍后自动重试";
+            if (statusCode >= 500)
+                return "HTTP " + statusCode + "：模型服务暂时不可用";
+
+            string detail = string.IsNullOrEmpty(responseText) ? (transportError ?? "请求失败") : Limit(responseText, 4000);
+            return "HTTP " + statusCode + "：" + detail;
         }
 
         public void Dispose()
