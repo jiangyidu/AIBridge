@@ -1,50 +1,38 @@
-# AI Bridge System Architecture
+# Pure C# Architecture and Domain Reload Recovery
 
-AI Bridge splits responsibilities between the **Unity Editor (C# Host)** and the **Python Agent Service**. Bidirectional IPC is handled via a lightweight local HTTP protocol.
+## Durable Agent loop
 
-```
-┌──────────────────────────────────────┐       HTTP Requests (LLM decisions)       ┌────────────────────────┐
-│          Unity Editor (C#)           │ <──────────────────────────────────────── │  Python Agent Service  │
-│                                      │                                           │                        │
-│   ┌──────────────────────────────┐   │           HTTP Session Polling            │   ┌────────────────┐   │
-│   │     AIAssistantWindow UI     │ ──┼─────────────────────────────────────────> │   │   service.py   │   │
-│   └──────────────┬───────────────┘   │                                           │   └────────┬───────┘   │
-│                  │ (HTTP client)     │                                           │            │           │
-│   ┌──────────────▼───────────────┐   │                                           │   ┌────────▼───────┐   │
-│   │     AgentBridge Server       │   │                                           │   │   agent_core.py│   │
-│   │        (HttpListener)        │   │                                           │   │ (ReAct Loop)   │   │
-│   └──────────────┬───────────────┘   │                                           │   └────────┬───────┘   │
-│                  │ (routing)         │                                           │            │           │
-│   ┌──────────────▼───────────────┐   │                                           │   ┌────────▼───────┐   │
-│   │       AgentToolRouter        │   │                                           │   │  UnityClient   │   │
-│   └──────────────┬───────────────┘   │                                           │   └────────────────┘   │
-│                  │                   │                                           └────────────────────────┘
-│    ┌─────────────┼─────────────┐     │
-│    ▼             ▼             ▼     │
-│ SceneQuery  CompileWatcher  Registry │
-└──────────────────────────────────────┘
+Unity recompilation rebuilds the AppDomain, so a task, thread, static field, editor window, or request object cannot own an end-to-end Agent run. `PureCSharpAgent` instead advances one persisted phase on each editor update:
+
+```text
+RequestingLlm -> WaitingLlm -> ExecutingTools
+                                  |-> ExecutingPreparedTool
+                                  `-> StartingCompile -> WaitingCompile -> restored domain
 ```
 
----
+Intent is saved to `Library/AIBridge` before a side effect. `[InitializeOnLoad]` restores update and compilation callbacks in the next domain.
 
-## 1. Bidirectional HTTP IPC
-The C# Editor hosts a lightweight HTTP listener (`AgentBridge.cs`) running in a background thread.
-* **Port Allocation**: Computed dynamically using an MD5 hash of the normalized active project path. This guarantees that multiple open Unity projects have unique ports (ranging from 8000 to 9999) and do not collide.
-* **Port Discovery**: On startup, Unity saves the assigned port to `AgentController/agent_port.txt`. The Python backend automatically reads this file to locate the active editor session.
+## LLM and ordinary tools
 
----
+An interrupted request is retried for the same logical decision with a maximum of three attempts. Network retries do not consume extra Agent steps.
 
-## 2. Python Agent Orchestration
-* **`service.py`**: Manages active sessions, streams agent events/text to the C# UI via HTTP response polling, and saves conversation logs to `ai_chat_history.json`.
-* **`agent_core.py` (ReAct Loop)**: Manages prompt formatting, LLM requests (supporting DeepSeek, Gemini, Claude, Ollama), and tool call parsing.
-* **`engine_client.py` & `unity_client.py`**: Encapsulates engine-specific calls, HTTP request timeouts, and compile state checks.
+Before an ordinary tool runs, a `Prepared` execution record is saved. If a reload occurs before the result is committed, the host reports `Uncertain` instead of replaying the tool. The model must inspect current scene or asset state before compensating.
 
----
+## Generated-source transaction
 
-## 3. Dynamic Compilation Workflow
-1. **Tool Invocation**: The Agent decides to write code (`compile_temp_method` or `compile_script`).
-2. **File Generation**:
-   * For temporary actions, it writes a static method into `AITempCommands.cs` using partial classes.
-   * For runtime scripts, it creates full `MonoBehaviour` classes in `Assets/Scripts/AITemp/`.
-3. **Compilation Polling**: The Python side uses `check_compile_status` in Unity. If the editor compiles successfully, the tool execution completes.
-4. **Error Recovery**: If compilation fails, the agent queries compiler diagnostic logs via `get_compile_errors` and rolls back the generated source to prevent corruption.
+1. Validate that the path is under `Assets` and reject dangerous source.
+2. Hash and back up the original file.
+3. Persist `Prepared` before writing source.
+4. Atomically write no-BOM UTF-8 source, persist `AwaitingCompilation`, then refresh assets.
+5. Accumulate errors across the complete compilation cycle.
+6. On success, wait for a new domain token and verify the target type/method.
+7. On failure, preserve original errors, restore/delete the generated source, and wait for recovery compilation plus reload.
+8. Stop automatic overwrite on any hash conflict.
+
+Compilation never implicitly executes generated code.
+
+## Cancellation and bounds
+
+Cancellation stops Agent scheduling and network work, while an already-started compile transaction is allowed to validate or roll back safely. Agent steps, request attempts, and compile waits are bounded. Rollback source is never written while Unity is compiling.
+
+Static source inspection is not a complete sandbox. Generated-code execution remains opt-in.

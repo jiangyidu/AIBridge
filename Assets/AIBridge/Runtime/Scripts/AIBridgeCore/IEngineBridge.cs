@@ -6,7 +6,7 @@ namespace AIBridge.Core
     /// 引擎桥接核心接口。
     /// 
     /// 每个目标宿主（Unity, AutoCAD, Tekla, UE4, ...）都需要实现此接口。
-    /// Python Agent 通过 HTTP 协议调用这些能力，不直接依赖任何引擎 API。
+    /// Editor-only C# Agent 通过此抽象调用宿主能力，不直接依赖具体引擎实现。
     /// 
     /// 2026-06-16: 从 AgentBridge.cs / SceneObserver.cs / CompileWatcher.cs 提取的
     /// 引擎无关契约，为跨平台移植提供统一的编程接口。
@@ -27,25 +27,25 @@ namespace AIBridge.Core
         /// <summary>项目数据目录路径（Unity: Application.dataPath, AutoCAD: 文档路径）。</summary>
         string DataPath { get; }
 
-        // ─── HTTP 桥接生命周期 ──────────────────────────────────────
+        // ─── 桥接生命周期（2.x 进程内实现保留 1.x API 形状） ───────
 
-        /// <summary>启动 HTTP 桥接服务。</summary>
+        /// <summary>启动桥接服务；进程内实现仅完成初始化。</summary>
         bool StartServer();
 
-        /// <summary>停止 HTTP 桥接服务。</summary>
+        /// <summary>停止桥接服务。</summary>
         void StopServer();
 
-        /// <summary>HTTP 桥接服务是否正在运行。</summary>
+        /// <summary>桥接服务是否可用。</summary>
         bool IsServerRunning { get; }
 
-        /// <summary>当前活跃的 HTTP 端口号。</summary>
+        /// <summary>兼容端口号；进程内实现返回 0。</summary>
         int ActivePort { get; }
 
         // ─── 主线程调度 ────────────────────────────────────────────
 
         /// <summary>
         /// 将一个操作排入主线程队列。
-        /// 大多数引擎 API 必须在主线程调用，HTTP 请求到达后通过此方法转发。
+        /// 大多数引擎 API 必须在主线程调用，通过此方法安全调度。
         /// </summary>
         void EnqueueMainThread(Action action);
 

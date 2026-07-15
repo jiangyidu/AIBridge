@@ -1,15 +1,8 @@
-# 基础设置示例 (Basic Setup)
+# 基础设置示例
 
-本示例包含一个极简的预配置场景，用于测试您的环境并向 AI Agent 发送第一条指令。
+1. 导入 AI Bridge，等待 Unity 完成编译。
+2. 打开 `AIBridge > Environment Setup Wizard`，确认 Unity 版本、工具定义和状态目录可用。
+3. 打开 `AIBridge > AI Assistant`，配置远程 API 或 Ollama。
+4. 先尝试“检查当前场景层级”，再尝试创建一个可撤销的立方体。
 
-## 使用说明
-
-1. 在 Unity 编辑器中打开 [SampleScene.unity](file:///f:/otherProject/AIBridge2026617/Assets/AIBridge/Samples/BasicSetup/SampleScene.unity) 场景。
-2. 点击顶部菜单栏的 **`AIBridge -> Environment Setup Wizard`**，运行环境向导检测您的 Python 与第三方库依赖。
-3. 确认环境无误后，点击顶部菜单栏的 **`AIBridge -> AI Assistant`** 打开 AI 聊天窗口。
-4. 展开 **配置 (Configuration)** 面板：
-   * 粘贴您的 API Key 并选择云端服务商（例如 DeepSeek、Gemini、Claude 等），或者
-   * 配置您的本地 Ollama 参数。
-5. 在聊天输入框中输入提示词，例如：
-   > “在场景中心创建一个红色立方体。”
-6. 观察 AI Agent 自动进行 ReAct 思考，并在 Unity 中自动生成并编译相关操作代码，最后在您的场景原点创建出该 Cube！
+AI Bridge 本身不需要外部运行时或本地代理进程。生成代码只会先编译，默认不会自动执行。

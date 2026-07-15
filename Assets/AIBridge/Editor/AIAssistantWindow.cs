@@ -10,8 +10,8 @@ namespace AIBridge.Agent
 {
     /// <summary>
     /// Unity Editor AI 助手窗口。
-    /// 重构后：Unity UI 不再直接调用 LLM、不再解析 AI 文本动作、不再执行 Legacy ReAct。
-    /// 所有 AI 交互和 Agent 决策都交给 Python Agent Service；Unity 只负责显示、配置、启动会话和执行工具命令。
+    /// 纯 C# 版本：UI 只负责配置与展示；可恢复 Agent 状态机独立于窗口运行，
+    /// 并将续跑状态持久化到 Library/AIBridge。
     /// </summary>
     public partial class AIAssistantWindow : EditorWindow
     {
@@ -84,6 +84,7 @@ namespace AIBridge.Agent
         private string _ollamaModel = "llama3";
         private string _userSystemPrompt = "";
         private int _maxSteps = 30;
+        private bool _allowGeneratedCodeExecution = false;
 
         private List<ChatMessage> _messages = new List<ChatMessage>();
         private string _inputText = "";
@@ -96,11 +97,7 @@ namespace AIBridge.Agent
         private string _agentStepStatus = null;
         private int _agentStepCount = 0;
         private string _activeSessionId = null;
-        private int _lastEventId = 0;
         private DateTime _lastHistoryLoad = DateTime.MinValue;
-        private double _nextEventPollTime = 0;
-        private int _consecutivePollFailures = 0;
-        private System.Diagnostics.Process _pythonServiceProcess = null;
 
         private string[] _cmdArgs = new string[0];
         private string[] _cmdArgValues = new string[0];
@@ -113,19 +110,9 @@ namespace AIBridge.Agent
             get { return Path.GetDirectoryName(Application.dataPath); }
         }
 
-        private static string AgentControllerDir
-        {
-            get { return Path.Combine(ProjectPath, "AgentController"); }
-        }
-
         private static string HistoryPath
         {
-            get { return Path.Combine(AgentControllerDir, "ai_chat_history.json"); }
-        }
-
-        private static string ServiceUrl
-        {
-            get { return PythonAgentClient.GetServiceUrl(ProjectPath); }
+            get { return AgentStateStore.HistoryPath; }
         }
 
         [MenuItem("AIBridge/AI Assistant")]
@@ -141,39 +128,30 @@ namespace AIBridge.Agent
             AgentToolDefinitions.Init(Application.dataPath);
             LoadPrefs();
             LoadHistory();
-            _activeSessionId = EditorPrefs.GetString("AIAss_ActiveSessionId", "");
-            _lastEventId = EditorPrefs.GetInt("AIAss_LastEventId", 0);
-            // 不盲目恢复旧会话，避免上一次未正常结束的 Python 线程继续让 UI 卡在旧状态。
-            _isWaiting = !string.IsNullOrEmpty(_activeSessionId) && PythonAgentClient.IsHealthy(ServiceUrl);
-            if (!_isWaiting)
-            {
-                _activeSessionId = null;
-                _lastEventId = 0;
-                EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
-                EditorPrefs.DeleteKey("AIAss_LastEventId");
-            }
+            SyncAgentState();
+            PureCSharpAgent.StateChanged -= OnAgentStateChanged;
+            PureCSharpAgent.StateChanged += OnAgentStateChanged;
             EditorApplication.update += OnEditorUpdate;
         }
 
         private void OnDisable()
         {
             SavePrefs();
-            EditorPrefs.SetString("AIAss_ActiveSessionId", _activeSessionId ?? "");
-            EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
+            PureCSharpAgent.StateChanged -= OnAgentStateChanged;
             EditorApplication.update -= OnEditorUpdate;
         }
 
         private void OnEditorUpdate()
         {
-            // 不要每一帧都同步 HTTP 轮询 Python，否则会占用 Unity 主线程，
-            // 进而阻塞 AgentBridge.Update 处理 Python 发来的 /agent/tool 请求。
-            if (_isWaiting && !string.IsNullOrEmpty(_activeSessionId))
+            SyncAgentState();
+            if (File.Exists(HistoryPath))
             {
-                double now = EditorApplication.timeSinceStartup;
-                if (now >= _nextEventPollTime)
+                DateTime write = File.GetLastWriteTimeUtc(HistoryPath);
+                if (write > _lastHistoryLoad)
                 {
-                    _nextEventPollTime = now + 0.35;
-                    PollPythonAgentSession();
+                    LoadHistory();
+                    _lastHistoryLoad = write;
+                    Repaint();
                 }
             }
         }
@@ -203,7 +181,7 @@ namespace AIBridge.Agent
             EditorGUILayout.BeginHorizontal(GUILayout.Height(34));
             EditorGUILayout.BeginVertical(GUILayout.Width(300));
             GUILayout.Label(AgentLocalization.Get("window_title", "AI Assistant"), ModernUI.WindowTitle);
-            GUILayout.Label("Python Agent · Unity Command Bridge", ModernUI.WindowSubtitle);
+            GUILayout.Label("Pure C# Agent · Domain Reload Resilient", ModernUI.WindowSubtitle);
             EditorGUILayout.EndVertical();
 
             GUILayout.FlexibleSpace();
@@ -215,7 +193,7 @@ namespace AIBridge.Agent
 
             if (GUILayout.Button("▶ " + AgentLocalization.Get("btn_detect_service", "启动 / 检测"), ModernUI.PrimaryButton, GUILayout.Width(128), GUILayout.Height(28)))
             {
-                DetectPythonAgentServiceAndReport();
+                DetectCSharpAgentRuntimeAndReport();
             }
             EditorGUILayout.EndHorizontal();
 
@@ -231,7 +209,7 @@ namespace AIBridge.Agent
                 _mode = LLMMode.Ollama;
                 SavePrefs();
             }
-            GUILayout.Label(AgentLocalization.Get("agent_badge", "Agent: Python"), ModernUI.AgentBadge, GUILayout.Width(116), GUILayout.Height(28));
+            GUILayout.Label(AgentLocalization.Get("agent_badge_csharp", "Agent: C#"), ModernUI.AgentBadge, GUILayout.Width(116), GUILayout.Height(28));
 
             GUILayout.FlexibleSpace();
 
@@ -278,65 +256,42 @@ namespace AIBridge.Agent
             return clicked;
         }
 
-        private void DetectPythonAgentServiceAndReport()
+        private void DetectCSharpAgentRuntimeAndReport()
         {
-            AddMessage("system", AgentLocalization.Get("msg_detecting_service", "正在检测 Python Agent Service 与 Unity 执行端..."));
+            AddMessage("system", AgentLocalization.Get("msg_detecting_csharp", "正在检测进程内 C# Agent、工具定义与持久化目录..."));
             SaveHistory();
 
-            bool serviceOk = false;
+            bool runtimeOk = false;
+            string detail = "";
             try
             {
-                serviceOk = EnsurePythonAgentService();
+                AgentToolDefinitions.Init(Application.dataPath);
+                string toolsJson = AgentToolDefinitions.GetToolsJson();
+                if (string.IsNullOrEmpty(toolsJson)) throw new InvalidOperationException("工具定义为空");
+                if (!Directory.Exists(AgentStateStore.StateDirectory))
+                    Directory.CreateDirectory(AgentStateStore.StateDirectory);
+                runtimeOk = AgentBridge.EnsureServerRunning();
+                detail = "C# Runtime: In-process\nState: " + AgentStateStore.StateDirectory +
+                         "\nDomain: " + AgentDomainIdentity.Current;
             }
             catch (Exception ex)
             {
-                AddMessage("assistant", AgentLocalization.GetFormat("msg_service_check_failed", ex.Message));
+                detail = ex.Message;
             }
 
-            if (!serviceOk)
+            if (!runtimeOk)
             {
-                AddMessage("assistant", AgentLocalization.Get("msg_service_no_response", "Python Agent Service 未能启动或未响应。请检查 Python 路径、run_agent_service.py、端口占用和依赖安装。"));
+                AddMessage("assistant", "C# Agent 运行时检测失败：" + detail);
                 SaveHistory();
                 Repaint();
-
-                if (EditorUtility.DisplayDialog(
-                    AgentLocalization.Get("dialog_env_error"),
-                    AgentLocalization.Get("dialog_env_error_msg"),
-                    AgentLocalization.Get("dialog_open_wizard"),
-                    AgentLocalization.Get("dialog_cancel")))
-                {
-                    AIBridgeSetupWizard.ShowWindow();
-                    this.Close();
-                }
                 return;
             }
 
-            bool bridgeOk = false;
-            try
-            {
-                bridgeOk = AgentBridge.EnsureServerRunning();
-            }
-            catch (Exception ex)
-            {
-                AddMessage("assistant", AgentLocalization.GetFormat("msg_bridge_check_failed", ex.Message));
-            }
-
-            if (bridgeOk)
-            {
-                AddMessage("system", AgentLocalization.Get("msg_check_completed", "检测完成：Python Agent Service 正常，Unity 执行端可用。"));
-                EditorUtility.DisplayDialog(
-                    AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
-                    AgentLocalization.Get("dialog_detect_success", "检测成功：Python Agent Service 与 Unity 执行端均可用。"),
-                    AgentLocalization.Get("dialog_ok", "确定"));
-            }
-            else
-            {
-                AddMessage("assistant", AgentLocalization.Get("msg_bridge_not_ready", "Python Agent Service 已可用，但 Unity 执行端未就绪。发送任务前请确认 AgentBridge 服务能正常启动。"));
-                EditorUtility.DisplayDialog(
-                    AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
-                    AgentLocalization.Get("dialog_detect_bridge_not_ready", "Python Agent Service 可用，但 Unity 执行端未就绪。详情已写入会话。"),
-                    AgentLocalization.Get("dialog_ok", "确定"));
-            }
+            AddMessage("system", "检测完成：纯 C# Agent 与 Unity 命令执行端可用。\n" + detail);
+            EditorUtility.DisplayDialog(
+                AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
+                "检测成功：无需 Python、pip、本地代理进程或端口。\n\n" + detail,
+                AgentLocalization.Get("dialog_ok", "确定"));
 
             SaveHistory();
             Repaint();
@@ -361,8 +316,8 @@ namespace AIBridge.Agent
             EditorGUILayout.BeginVertical(ModernUI.Card, GUILayout.ExpandWidth(true));
 
             EditorGUILayout.BeginHorizontal();
-            string configTitle = AgentLocalization.Get("config_title_new", "Python 智能体配置");
-            string configSubtitle = AgentLocalization.Get("config_subtitle", "（Unity 只负责执行命令，不直接调用 LLM）");
+            string configTitle = AgentLocalization.Get("config_title_csharp", "C# 智能体配置");
+            string configSubtitle = AgentLocalization.Get("config_subtitle_csharp", "（Unity 进程内直连 LLM，状态可跨脚本重载恢复）");
             GUILayout.Label(configTitle, ModernUI.CardTitle, GUILayout.Width(140));
             GUILayout.Label(configSubtitle, ModernUI.CardSubtitle);
             GUILayout.FlexibleSpace();
@@ -462,8 +417,21 @@ namespace AIBridge.Agent
         private void DrawServiceRow()
         {
             EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
-            GUILayout.Label(AgentLocalization.Get("config_python_service", "Python 服务"), ModernUI.FieldLabel, GUILayout.Width(92));
-            EditorGUILayout.SelectableLabel(ServiceUrl, ModernUI.MiniValue, GUILayout.Height(22), GUILayout.ExpandWidth(true));
+            GUILayout.Label(AgentLocalization.Get("config_csharp_runtime", "C# 运行时"), ModernUI.FieldLabel, GUILayout.Width(92));
+            EditorGUILayout.SelectableLabel("In-process · Reload Resilient", ModernUI.MiniValue, GUILayout.Height(22), GUILayout.ExpandWidth(true));
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(AgentLocalization.Get("config_execute_generated", "执行生成代码"), ModernUI.FieldLabel, GUILayout.Width(92));
+            bool next = EditorGUILayout.ToggleLeft(
+                AgentLocalization.Get("config_execute_generated_hint", "允许自动执行 AI 生成的临时代码（默认关闭）"),
+                _allowGeneratedCodeExecution,
+                GUILayout.ExpandWidth(true));
+            if (next != _allowGeneratedCodeExecution)
+            {
+                _allowGeneratedCodeExecution = next;
+                SavePrefs();
+            }
             EditorGUILayout.EndHorizontal();
         }
 
@@ -491,7 +459,7 @@ namespace AIBridge.Agent
             _chatScroll = EditorGUILayout.BeginScrollView(_chatScroll, GUILayout.ExpandHeight(true));
             if (_messages.Count == 0)
             {
-                GUILayout.Label(AgentLocalization.Get("empty_chat_hint", "输入任务后，Python Agent 会在这里显示执行过程与结果。"), ModernUI.EmptyHint, GUILayout.ExpandHeight(true));
+                GUILayout.Label(AgentLocalization.Get("empty_chat_hint_csharp", "输入任务后，C# Agent 会在这里显示可恢复的执行过程与结果。"), ModernUI.EmptyHint, GUILayout.ExpandHeight(true));
             }
             else
             {
@@ -502,7 +470,7 @@ namespace AIBridge.Agent
             {
                 string status = !string.IsNullOrEmpty(_agentStepStatus)
                     ? AgentLocalization.GetFormat("agent_executing", _agentStepStatus)
-                    : AgentLocalization.Get("agent_processing", "Python Agent 正在处理请求...");
+                    : AgentLocalization.Get("agent_processing_csharp", "C# Agent 正在处理请求...");
                 GUILayout.Space(6);
 
                 // Graphical progress bar feedback
@@ -1126,10 +1094,16 @@ namespace AIBridge.Agent
 
         private void SendUserMessage(string text)
         {
+            if (PureCSharpAgent.IsRunning)
+            {
+                AddMessage("system", "已有 C# Agent 会话正在运行，请先等待完成或点击停止。");
+                SaveHistory();
+                return;
+            }
+
             AddMessage("user", text);
             SaveHistory();
 
-            // 先确认 Unity 执行端在线。若 AgentBridge 没有启动，继续请求 LLM 只会卡在 query_scene。
             if (!AgentBridge.EnsureServerRunning())
             {
                 AddMessage("assistant", AgentLocalization.Get("err_bridge_not_running"));
@@ -1137,219 +1111,80 @@ namespace AIBridge.Agent
                 return;
             }
 
-            if (!EnsurePythonAgentService())
+            AgentSessionConfig config = BuildSessionConfig();
+            string error;
+            if (PureCSharpAgent.StartSession(config, BuildConversationState(), out error))
             {
-                AddMessage("assistant", AgentLocalization.Get("err_service_not_running"));
+                SyncAgentState();
+                LoadHistory();
+            }
+            else
+            {
+                AddMessage("assistant", "C# Agent 启动失败：" + error);
                 SaveHistory();
-                return;
             }
-
-            // 防止上一次卡在 Unity 离线重试中的 Python 会话继续占用日志与请求。
-            try { PythonAgentClient.PostJson(ServiceUrl + "/sessions/cancel_all", AgentJson.NewObject(), 2000); } catch { }
-
-            JsonData config = BuildSessionConfig(text);
-            try
-            {
-                string resp = PythonAgentClient.PostJson(ServiceUrl + "/sessions/start", config, 10000);
-                JsonData data = AgentJson.ParseObject(resp);
-                if (AgentJson.HasKey(data, "Success") && data["Success"].ToString().ToLower() == "true")
-                {
-                    _activeSessionId = AgentJson.GetString(data, "SessionId");
-                    _lastEventId = 0;
-                    _agentStepCount = 0;
-                    _agentStepStatus = null;
-                    _isWaiting = true;
-                    _nextEventPollTime = 0;
-                    _consecutivePollFailures = 0;
-                    EditorPrefs.SetString("AIAss_ActiveSessionId", _activeSessionId);
-                    EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
-                    AddMessage("system", AgentLocalization.GetFormat("msg_session_started", _activeSessionId));
-                }
-                else
-                {
-                    AddMessage("assistant", AgentLocalization.GetFormat("err_session_start_failed", resp));
-                }
-            }
-            catch (Exception ex)
-            {
-                AddMessage("assistant", AgentLocalization.GetFormat("err_session_start_exception", ex.Message));
-                _isWaiting = false;
-            }
-            SaveHistory();
             Repaint();
         }
 
-        private JsonData BuildSessionConfig(string userMessage)
+        private AgentSessionConfig BuildSessionConfig()
         {
-            JsonData data = AgentJson.NewObject();
-            data["project_path"] = ProjectPath;
-            data["user_message"] = userMessage;
-            data["unity_version"] = Application.unityVersion;
-            data["api_url"] = GetCurrentApiUrl();
-            data["api_key"] = _mode == LLMMode.Ollama ? "" : _apiKey;
-            data["model"] = _mode == LLMMode.Ollama ? _ollamaModel : _modelName;
-            data["mode"] = _mode == LLMMode.Ollama ? "ollama" : "remote_api";
-            data["provider"] = _mode == LLMMode.Ollama ? "openai-compatible" : ProviderNames[(int)_provider];
-            data["user_system_prompt"] = _userSystemPrompt ?? "";
-            data["max_steps"] = _maxSteps;
-            data["cancel_existing"] = true;
-            data["unity_startup_timeout"] = 30;
-            data["unity_reconnect_timeout"] = 15;
-            data["unity_tool_timeout"] = 15;
-            data["unity_tool_retries"] = 5;
-            data["language"] = AgentLocalization.CurrentLanguage;
+            AgentSessionConfig data = new AgentSessionConfig();
+            data.apiUrl = GetCurrentApiUrl();
+            data.apiKey = _mode == LLMMode.Ollama ? "" : _apiKey;
+            data.model = _mode == LLMMode.Ollama ? _ollamaModel : _modelName;
+            data.provider = _mode == LLMMode.Ollama ? "openai-compatible" : ProviderNames[(int)_provider];
+            data.userSystemPrompt = _userSystemPrompt ?? "";
+            data.maxSteps = _maxSteps;
+            data.language = AgentLocalization.CurrentLanguage;
             return data;
+        }
+
+        private List<AgentMessageState> BuildConversationState()
+        {
+            List<AgentMessageState> result = new List<AgentMessageState>();
+            for (int i = 0; i < _messages.Count; i++)
+            {
+                ChatMessage source = _messages[i];
+                if (source.role != "user" && source.role != "assistant") continue;
+                AgentMessageState message = new AgentMessageState();
+                message.role = source.role;
+                message.content = source.content ?? "";
+                message.reasoningContent = source.reasoning_content ?? "";
+                result.Add(message);
+            }
+            return result;
         }
 
         private string GetCurrentApiUrl()
         {
-            if (_mode == LLMMode.Ollama) return _ollamaUrl.TrimEnd('/') + "/v1/chat/completions";
-            if (_provider == APIProvider.Claude) return _baseUrl.TrimEnd('/');
-            return _baseUrl.TrimEnd('/') + "/chat/completions";
+            string baseUrl = (_mode == LLMMode.Ollama ? _ollamaUrl : _baseUrl) ?? "";
+            baseUrl = baseUrl.Trim().TrimEnd('/');
+            if (_provider == APIProvider.Claude && _mode != LLMMode.Ollama) return baseUrl;
+            if (baseUrl.EndsWith("/chat/completions", StringComparison.OrdinalIgnoreCase)) return baseUrl;
+            if (_mode == LLMMode.Ollama && !baseUrl.EndsWith("/v1", StringComparison.OrdinalIgnoreCase))
+                baseUrl += "/v1";
+            return baseUrl + "/chat/completions";
         }
 
-        private bool EnsurePythonAgentService()
+        private void OnAgentStateChanged()
         {
-            if (PythonAgentClient.IsHealthy(ServiceUrl)) return true;
-
-            string script = Path.Combine(AgentControllerDir, "run_agent_service.py");
-            if (!File.Exists(script))
-            {
-                Debug.LogError("[AIAssistantWindow] run_agent_service.py not found: " + script);
-                return false;
-            }
-
-            try
-            {
-                string pythonCmd = EditorPrefs.GetString("AIBridge_PythonCmd", "python");
-                var psi = new System.Diagnostics.ProcessStartInfo
-                {
-                    FileName = pythonCmd,
-                    Arguments = "\"" + script + "\" --project-path \"" + ProjectPath + "\" --port " + PythonAgentClient.GetServicePort(ProjectPath),
-                    UseShellExecute = false,
-                    CreateNoWindow = true,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    WorkingDirectory = AgentControllerDir
-                };
-                _pythonServiceProcess = new System.Diagnostics.Process();
-                _pythonServiceProcess.StartInfo = psi;
-                _pythonServiceProcess.OutputDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.Log("[Python Agent Service] " + e.Data); };
-                _pythonServiceProcess.ErrorDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.LogError("[Python Agent Service Error] " + e.Data); };
-                _pythonServiceProcess.Start();
-                _pythonServiceProcess.BeginOutputReadLine();
-                _pythonServiceProcess.BeginErrorReadLine();
-                EditorPrefs.SetInt("AIAss_ServicePid", _pythonServiceProcess.Id);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError("[AIAssistantWindow] Failed to start Python Agent Service: " + ex.Message);
-                return false;
-            }
-
-            double start = EditorApplication.timeSinceStartup;
-            while (EditorApplication.timeSinceStartup - start < 8.0)
-            {
-                if (PythonAgentClient.IsHealthy(ServiceUrl)) return true;
-                System.Threading.Thread.Sleep(250);
-            }
-            return PythonAgentClient.IsHealthy(ServiceUrl);
+            SyncAgentState();
+            Repaint();
         }
 
-        private void PollPythonAgentSession()
+        private void SyncAgentState()
         {
-            try
-            {
-                string url = ServiceUrl + "/sessions/" + _activeSessionId + "/events?after=" + _lastEventId;
-                string json = PythonAgentClient.Get(url, 1000);
-                JsonData data = AgentJson.ParseObject(json);
-                if (AgentJson.HasKey(data, "Events") && data["Events"].IsArray)
-                {
-                    JsonData events = data["Events"];
-                    for (int i = 0; i < events.Count; i++)
-                    {
-                        JsonData ev = events[i];
-                        if (AgentJson.HasKey(ev, "id")) int.TryParse(ev["id"].ToString(), out _lastEventId);
-                        HandleAgentEvent(ev);
-                    }
-                    EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
-                }
-
-                if (File.Exists(HistoryPath))
-                {
-                    DateTime write = File.GetLastWriteTime(HistoryPath);
-                    if (write > _lastHistoryLoad)
-                    {
-                        LoadHistory();
-                        _lastHistoryLoad = write;
-                    }
-                }
-
-                bool finished = AgentJson.HasKey(data, "Finished") && data["Finished"].ToString().ToLower() == "true";
-                _consecutivePollFailures = 0;
-
-                if (finished)
-                {
-                    _isWaiting = false;
-                    _activeSessionId = null;
-                    _agentStepStatus = null;
-                    _agentStepCount = 0;
-                    EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
-                    EditorPrefs.DeleteKey("AIAss_LastEventId");
-                    LoadHistory();
-                }
-                Repaint();
-            }
-            catch
-            {
-                // Python Service 可能正在启动或短暂繁忙，下一次节流轮询继续。
-                _consecutivePollFailures++;
-                if (_consecutivePollFailures > 30)
-                {
-                    AddMessage("assistant", AgentLocalization.Get("err_poll_timeout"));
-                    _isWaiting = false;
-                    _activeSessionId = null;
-                    EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
-                    EditorPrefs.DeleteKey("AIAss_LastEventId");
-                    SaveHistory();
-                }
-            }
-        }
-
-        private void HandleAgentEvent(JsonData ev)
-        {
-            string type = AgentJson.GetString(ev, "type");
-            string message = AgentJson.GetString(ev, "message");
-            if (type == "llm_request_started")
-            {
-                _agentStepCount++;
-                _agentStepStatus = "[Step " + _agentStepCount + "] " + AgentLocalization.Get("step_request_llm", "请求 LLM");
-            }
-            else if (type == "tool_call_started")
-            {
-                _agentStepStatus = message;
-            }
-            else if (type == "compile_polling" || type == "compile_started")
-            {
-                _agentStepStatus = message;
-            }
+            AgentSessionState state = PureCSharpAgent.CurrentState;
+            _isWaiting = state != null && state.active;
+            _activeSessionId = state == null ? null : state.sessionId;
+            _agentStepCount = state == null ? 0 : state.step;
+            _agentStepStatus = state == null ? null : state.status;
         }
 
         private void StopPendingSession()
         {
-            if (!string.IsNullOrEmpty(_activeSessionId))
-            {
-                try { PythonAgentClient.PostJson(ServiceUrl + "/sessions/" + _activeSessionId + "/cancel", AgentJson.NewObject(), 3000); }
-                catch { }
-            }
-            _isWaiting = false;
-            _activeSessionId = null;
-            _agentStepStatus = null;
-            _agentStepCount = 0;
-            EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
-            EditorPrefs.DeleteKey("AIAss_LastEventId");
-            AddMessage("system", AgentLocalization.Get("msg_session_terminated"));
-            SaveHistory();
+            PureCSharpAgent.Cancel();
+            _agentStepStatus = "正在安全终止 C# Agent；已开始的编译回滚不会被中断";
             Repaint();
         }
 
@@ -1393,7 +1228,9 @@ namespace AIBridge.Agent
                     arr.Add(item);
                 }
                 root["messages"] = arr;
-                if (!Directory.Exists(AgentControllerDir)) Directory.CreateDirectory(AgentControllerDir);
+                string historyDirectory = Path.GetDirectoryName(HistoryPath);
+                if (!string.IsNullOrEmpty(historyDirectory) && !Directory.Exists(historyDirectory))
+                    Directory.CreateDirectory(historyDirectory);
                 WriteTextSharedWithRetry(HistoryPath, JsonMapper.ToJson(root));
             }
             catch (Exception e) { Debug.LogWarning("[AIAssistant] 保存历史失败: " + e.Message); }
@@ -1478,15 +1315,17 @@ namespace AIBridge.Agent
         private void SavePrefs()
         {
             AIBridgeSettings settings = AIBridgeSettings.GetOrCreateSettings();
-            settings.Mode = (int)_mode;
-            settings.Provider = (int)_provider;
-            settings.BaseUrl = _baseUrl ?? "";
-            settings.ModelName = _modelName ?? "";
-            settings.OllamaUrl = _ollamaUrl ?? "";
-            settings.OllamaModel = _ollamaModel ?? "";
-            settings.UserSystemPrompt = _userSystemPrompt ?? "";
-            settings.MaxSteps = _maxSteps;
-            settings.ShowReasoning = _showReasoning;
+            settings.Apply(
+                (int)_mode,
+                (int)_provider,
+                _baseUrl,
+                _modelName,
+                _ollamaUrl,
+                _ollamaModel,
+                _userSystemPrompt,
+                _maxSteps,
+                _showReasoning,
+                _allowGeneratedCodeExecution);
 
             // API key is stored securely using AES encryption in EditorPrefs
             EditorPrefs.SetString("AIAss_Api_Key", AgentEncryptionUtility.Encrypt(_apiKey));
@@ -1504,6 +1343,7 @@ namespace AIBridge.Agent
             _userSystemPrompt = settings.UserSystemPrompt;
             _maxSteps = settings.MaxSteps;
             _showReasoning = settings.ShowReasoning;
+            _allowGeneratedCodeExecution = settings.AllowGeneratedCodeExecution;
 
             _apiKey = AgentEncryptionUtility.Decrypt(EditorPrefs.GetString("AIAss_Api_Key", ""));
         }

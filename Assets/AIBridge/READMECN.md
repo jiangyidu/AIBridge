@@ -1,185 +1,64 @@
-# AI Bridge (AI 桥接器)
+# AI Bridge 2.0
 
-`AI Bridge`（UPM 包名：`com.LegendMars.aibridge`）是一个功能强大、轻量且可扩展的 Unity 编辑器 AI Agent 桥接框架。它连接本地大模型（如 Ollama） and 云端大模型（如 DeepSeek、Gemini、Claude 等），用于在 Unity 编辑器中直接执行 C# 命令并运行智能 ReAct 代理（Agent）。
+AI Bridge 是一个兼容 Unity 2018.4+ 的 Editor-only 纯 C# 智能体插件。它通过 `UnityWebRequest` 直接访问远程 OpenAI-compatible、Claude API 或本地 Ollama，并在 Unity 主线程内调用工具。
 
-该框架设计有独立的引擎抽象层（Engine-agnostic core），未来可以轻松扩展到其他 CAD/3D 软件环境（如 AutoCAD、Tekla、Unreal Engine 等）。
+本版本不需要 Python、pip、本地代理服务、监听端口或额外可执行文件，适合通过经典 `.unitypackage` 分发。
 
----
+## 核心设计
 
-## 🏗 系统架构
+- `PureCSharpAgent` 由 `EditorApplication.update` 驱动，每次只推进一个持久化阶段，不把主循环寄托在 `Task`、后台线程或窗口实例上。
+- 会话状态写入 `Library/AIBridge/agent-state.json`。API Key 不写入状态文件。
+- LLM 请求若被 Domain Reload 中断，会使用同一决策 ID 最多重试 3 次；网络重试不额外消耗 Agent 步数。
+- 普通工具在“已准备、结果未提交”期间发生重载时不会自动重放，而是向模型返回 `Uncertain`，避免重复创建、重复写入等副作用。
+- 生成源码采用独立文件和两阶段编译事务：先保存事务与备份，再原子写入 Assets，最后触发刷新。
+- 编译错误按完整编译周期累计。失败后恢复原文件，再等待恢复编译与第二次 Domain Reload 完成。
+- 成功编译后必须检测到新的脚本域标识，并验证目标类型/方法已加载，才把成功结果交回 Agent。
+- 编译与执行严格分离。AI 生成代码默认禁止自动执行，可在配置中显式开启。
 
-AI Bridge 在 **Unity 编辑器 (C#)** 主机和 **Python Agent 服务**之间划分了职责。它们使用轻量级 HTTP 协议在动态分配的端口上进行双向通信。
+## 安装
 
-### 架构工作流
+1. 在 Unity 2018.4 或更高版本中导入 `.unitypackage`，或把 `Assets/AIBridge` 复制到项目。
+2. 等待 Unity 完成编译。
+3. 打开 `AIBridge > Environment Setup Wizard`，检查工具定义和 `Library/AIBridge` 可写性。
+4. 打开 `AIBridge > AI Assistant`，配置模型、接口地址和 API Key。
 
-```mermaid
-graph TD
-    subgraph Unity 编辑器 (C# 端)
-        Window[AIAssistantWindow UI 窗口]
-        BridgeClient[PythonAgentClient 客户端]
-        Server[AgentBridge HTTP 服务端]
-        Router[AgentToolRouter 工具路由器]
-        Registry[AgentCommandRegistry 命令注册表]
-        Compiler[CompileWatcher / UnityEngineBridge 编译器与网桥]
-    end
+无需安装任何第三方运行时。Ollama 模式仍需要用户自己运行 Ollama，因为它本身就是所选的模型服务，而不是 AI Bridge 的内部依赖。
 
-    subgraph 后端服务 (Python 端)
-        Service[run_agent_service.py]
-        Runner[AgentRunner 会话执行器]
-        Engine[UnityClient / EngineClient 引擎客户端]
-    end
+## 使用
 
-    subgraph 大语言模型提供商
-        LLM[DeepSeek / Gemini / Claude / Ollama]
-    end
+输入任务后，Agent 会优先探查场景，再使用固定工具。只有固定工具无法满足需求时，才会请求 `compile_temp_method` 或 `compile_script`。
 
-    %% 用户交互
-    Window -- 1. 启动会话 / 发送聊天 --> Service
-    Service -- 2. 派生 --> Runner
-    
-    %% Agent 循环
-    Runner -- 3. 请求 LLM 决策 --> LLM
-    LLM -- 4. 工具调用 / 文本回复 --> Runner
-    
-    %% 引擎执行
-    Runner -- 5. 执行工具请求 --> Engine
-    Engine -- 6. HTTP POST /agent/tool --> Server
-    Server -- 7. 路由并执行 --> Router
-    Router -- 8. 读取场景 / 运行 C# 命令 --> Registry
-    Router -- 9. 编译代码 / 挂载脚本 --> Compiler
-    
-    %% 响应循环
-    Server -- 10. HTTP 响应 (工具结果) --> Engine
-    Engine -- 11. 将结果喂回上下文 --> Runner
-    
-    %% UI 轮询
-    Window -- 12. 轮询会话事件 --> Service
-    Service -- 13. UI 事件流 / 聊天历史 --> Window
-```
+常用工具包括：
 
----
+- `query_scene` / `query_object`：只读探查。
+- `create_gameobject` / `create_material` / `set_material`：可撤销的常见编辑操作。
+- `compile_temp_method`：为 `AITempCommands` 生成独立 partial 文件。
+- `compile_script`：在 `Assets/Scripts/AITemp` 生成 MonoBehaviour 源码。
+- `execute_command`：执行已注册 `[AgentCommand]`；生成命令受“执行生成代码”开关保护。
 
-## 🌟 核心特性
+## 安全边界
 
-1. **引擎无关核心 (`EngineClient`)**
-   - Python 后端将通用的协议逻辑（HTTP 通信、连接重试、事件日志、动态编译轮询）与特定引擎细节解耦。通过继承 `EngineClient`，可方便地将该框架移植到 AutoCAD、Tekla、Unreal Engine 等其他软件中。
+系统会拒绝生成源码中的进程启动、网络访问、原生调用、程序集动态加载、原始文件操作、脚本加载回调、编辑器永久事件和危险资产移动/删除等片段，也会校验标识符、目标类型和大括号。
 
-2. **双向 HTTP IPC 与哈希端口自动发现**
-   - Unity 端托管一个本地 HTTP 服务器（`AgentBridge`）。其监听端口由当前项目路径的 MD5 哈希动态计算（范围 `8000-9999`），以防止在一台机器上同时运行多个 Unity 项目时发生端口冲突。
-   - 活动端口会自动写入 `AgentController/agent_port.txt`，供 Python 后端自动读取和连接。
+这些检查是风险收敛措施，不是完整的 C# 安全沙箱。启用“执行生成代码”前应查看生成文件，并使用版本控制保护项目。用户自己注册的 `[AgentCommand]` 也应保持最小权限、支持 Undo、可重复调用并验证参数。
 
-3. **动态代码编译与执行**
-   - **临时方法**：Agent 可以在运行时自动编写 C# 静态方法并将其写入独立的 partial 文件中（注入 `AITempCommands.cs`）。
-   - **MonoBehaviour 脚本**：Agent 可以将完整的 C# 脚本写入 `Assets/Scripts/AITemp/` 目录并触发 Unity 同步编译。
-   - **编译状态轮询**：后端通过 `/agent/tool`（子命令 `check_compile_status`）轮询编译进度，并在失败时通过 `get_compile_errors` 返回详细的报错信息供 LLM 自行修正。
+## 持久化文件
 
-4. **丰富的编辑器聊天界面 (`AIAssistantWindow`)**
-   - 功能完备的 Unity 编辑器窗口，支持远程 LLM API 和 Ollama 本地模型。
-   - 支持展示现代推理模型（如 DeepSeek R1）的推理思索过程内容（`reasoning_content`）。
-   - 包含手动执行面板，用于搜索和手动运行任何标有 `[AgentCommand]` 特性的 C# 方法。
+以下运行数据位于 `Library/AIBridge`，不应提交或打包：
 
-5. **环境配置向导 (`AIBridgeSetupWizard`)**
-   - 自动检测本地 Python 安装路径，检查 pip，并一键自动安装所需的 Python `requests` 依赖包。
+- `agent-state.json`：Agent 阶段、消息、待处理工具和重试状态。
+- `compile-state.json`：源码哈希、备份路径、编译周期和回滚状态。
+- `chat-history.json`：窗口聊天历史。
+- `backups/`：编译事务的短期源码备份。
 
-6. **双模执行机制**
-   - **交互模式**：直接在 Unity 编辑器 GUI 窗口中运行。
-   - **Batchmode CLI 模式**：在 Unity 未打开时，通过 `unity_agent_controller.py` 使用 Unity 的 `-batchmode` 命令行静默启动执行自动化任务。
+## 验证
 
----
+在修改插件后至少执行：
 
-## 🚀 快速上手
+1. Unity Console 无 C# 编译错误。
+2. `dotnet build AIBridge.Editor.csproj --no-restore`（该文件由当前 Unity 生成时）。
+3. 测试正常生成脚本：编译、Domain Reload、目标验证、Agent 继续。
+4. 测试故意生成语法错误：记录原始错误、恢复源码、恢复编译、Agent 收到失败。
+5. 在等待 LLM 和执行普通工具的提交边界分别触发脚本重载，确认有限重试和不重放策略。
 
-### 前提条件
-- **Unity**：2018.4.36f1 或更高版本。
-- **Python**：3.8 或更高版本。
-
-### 第一步：安装并设置 Python 环境
-1. 在 Unity 中打开项目。
-2. 在 Unity 顶部菜单栏中，点击 **`AIBridge -> Environment Setup Wizard`**。
-3. 按照向导步骤操作，自动检测系统中的 Python 环境并安装所需的 `requests` 依赖库。
-
-### 第二步：打开 AI 助手窗口
-1. 在 Unity 顶部菜单栏中，点击 **`AIBridge -> AI Assistant`**。
-2. 展开 **配置 (Configuration)** 面板。
-3. 配置您的 API 终点：
-   - **远程 API (Remote API)**：选择大模型供应商（DeepSeek、Gemini、Claude、通义千问、Kimi、智谱 GLM 等）并填写 **API Key**。
-   - **Ollama 本地**：指定本地 Ollama 的 URL（如 `http://localhost:11434`）和模型名称。
-4. 隐藏或保持配置面板展开。在输入框中键入您的任务或提问，然后点击 **发送 (Send)** 即可！
-
----
-
-## 🛠 开发者指南
-
-### 向 AI 暴露 C# 命令
-您可以轻松向 AI 代理暴露自定义的 C# 编辑器任务。只需编写一个 `public static` 方法并用 `[AgentCommand]` 特性进行装饰：
-
-```csharp
-using UnityEngine;
-using AIBridge.Agent;
-
-namespace AIBridge.Agent
-{
-    public static class CustomEditorTasks
-    {
-        [AgentCommand("在场景中生成一个预制体阵列", category: "Custom")]
-        public static string GenerateGrid(string prefabName, int rows, int cols, float spacing)
-        {
-            // 加载预制体，循环实例化
-            // 向 LLM 返回执行状态或日志
-            return $"成功生成 {rows}x{cols} 的 '{prefabName}' 阵列。";
-        }
-    }
-}
-```
-
-项目每次重新载入程序集时，系统会自动扫描所有带该特性的方法，并将其注册到命令注册表（`AgentCommandRegistry`）中，供 Python 侧通过 `/agent/commands` 拉取。
-
-### Python 命令行控制
-要在命令行中直接控制 Unity（如果 Unity 正在运行，则通过 HTTP IPC 快速执行；如果已关闭，则自动以 batchmode 启动 Unity）：
-
-```bash
-# 列出所有在 Unity 中注册的 [AgentCommand] 命令
-python AgentController/unity_agent_controller.py list
-
-# 执行指定命令
-python AgentController/unity_agent_controller.py run --class "AntigravityTasks" --method "CreateCustomCube" --args "MyProceduralCube"
-```
-
----
-
-## 📁 项目目录结构
-
-```text
-AIBridge/
-├── Assets/
-│   ├── Editor/
-│   │   ├── AntigravityTasks.cs       # 自定义任务容器
-│   │   └── AITempCommands.cs         # AI 临时命令 Partial 类定义
-│   └── AIBridge/                     # UPM 核心包目录
-│       ├── package.json              # 包配置清单
-│       ├── LICENSE.md                # 许可协议
-│       ├── Editor/                   # 编辑器 C# 脚本
-│       │   ├── AIAssistantWindow.cs  # 聊天窗口 GUI
-│       │   ├── AgentBridge.cs        # HTTP 本地服务器
-│       │   ├── AgentToolRouter.cs    # 工具请求路由
-│       │   ├── SceneObserver.cs      # 场景层级查看器
-│       │   └── ...                   
-│       ├── Runtime/                  # 运行时 C# 脚本
-│       │   ├── AgentCommandAttribute.cs
-│       │   └── ...
-│       └── Samples/                 # 基础配置和示例资源
-└── AgentController/                  # Python 后端
-    ├── run_agent_service.py          # 后端 HTTP 会话服务启动器
-    ├── unity_agent_controller.py     # 命令行 CLI 执行入口
-    └── python_agent/                 # Python 核心源码
-        ├── agent_core.py             # ReAct 循环编排
-        ├── engine_client.py          # 引擎抽象通信基类
-        ├── unity_client.py           # Unity 专有客户端实现
-        ├── service.py                # 会话管理 HTTP 服务
-        └── providers.py              # LLM 客户端包装类
-```
-
----
-
-## 📄 许可协议
-本项目基于 MIT 许可协议开源。详情请参阅 [LICENSE.md](file:///f:/otherProject/AIBridge2026617/Assets/AIBridge/LICENSE.md) 文件。
+详细流程见 `Documentation~/architectureCN.md`，故障处理见 `Documentation~/troubleshootingCN.md`。

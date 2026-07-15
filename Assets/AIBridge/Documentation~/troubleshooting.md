@@ -1,37 +1,23 @@
-# AI Bridge Troubleshooting Guide
+# Troubleshooting
 
-This document lists common issues, setup failures, and their corresponding resolutions.
+## Agent did not continue after compilation
 
----
+Check Unity Console first, then inspect `Library/AIBridge/agent-state.json` and `compile-state.json`. `FailedConflict` means another operation changed the source during the transaction; compare it with the backup manually and do not force an overwrite.
 
-## 1. Python Environment Check Failures
-**Issue**: The Setup Wizard reports that Python or pip cannot be found.
-* **Resolution**:
-  1. Ensure Python 3.8+ is installed on your operating system.
-  2. During Python installation, make sure to check the option **"Add Python to PATH"** (on Windows).
-  3. Re-run the Setup Wizard in Unity (`AIBridge -> Environment Setup Wizard`). If it still fails, you can manually enter the absolute path to your `python.exe` in the wizard text field.
+## Generated source failed to compile
 
----
+The transaction preserves the original errors, restores the prior source, and waits for recovery compilation. Do not delete the transaction file while rollback is active. `FailedRollback` means the original project still fails, the backup is unavailable, or recovery timed out.
 
-## 2. API Key Issues and Storage
-**Issue**: Unauthorized errors or incorrect API Key warnings.
-* **Resolution**:
-  * Open `AIBridge -> AI Assistant`, click the **配置 (Configuration)** panel, and double-check your API key and provider endpoint.
-  * *Note*: Keys are stored in `EditorPrefs`. Make sure you don't share your project settings or preferences files publicly if they contain sensitive keys.
+## Request was interrupted by script reload
 
----
+This is expected. A request object cannot survive an AppDomain rebuild. The host retries the same logical decision up to three times, then stops rather than loop forever.
 
-## 3. Dynamic Compilation Failures
-**Issue**: The LLM Agent tries to generate code, but Unity logs compilation errors, causing the agent loop to freeze or retry indefinitely.
-* **Resolution**:
-  * Check the **Unity Console** panel to see the exact compilation error.
-  * The Python backend automatically attempts to rollback bad generated code using `RollbackPendingGeneratedSource`. However, if compilation is broken by manual changes, fix the syntax errors manually so Unity can re-compile.
-  * Look into `Assets/Editor/AITempCommands.cs` or scripts under `Assets/Scripts/AITemp/` to verify what the agent wrote.
+## Tool returned `Uncertain`
 
----
+The reload occurred across an ordinary tool's execution/commit boundary. The tool is not replayed. Inspect current scene or asset state before compensating.
 
-## 4. Forbidden Code Fragments (Security Exception)
-**Issue**: The agent command is blocked and raises a security validation warning.
-* **Resolution**:
-  * AI Bridge restricts code execution to prevent destructive commands (such as deleting operating system files, opening external processes, or scanning user directories).
-  * If the LLM generates code containing keywords like `Process.Start`, `File.Delete`, or namespace imports outside Unity standard packages, the compiler watcher blocks it. Adjust your prompt to ensure the AI does not attempt system-level operations.
+## Generated code was rejected or not executed
+
+Prefer fixed tools and remove process, network, native, reflection-loading, filesystem, initialization-hook, static-constructor, and persistent editor-event behavior. Successful compilation does not execute code. Review the source before enabling the generated-code execution setting.
+
+Only clear `Library/AIBridge` after the Agent is stopped and no compile/rollback transaction is active.

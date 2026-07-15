@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Reflection;
 using System.Text;
+using System.Text.RegularExpressions;
 using LitJson;
 using UnityEditor;
 using UnityEngine;
@@ -14,49 +15,73 @@ namespace AIBridge.Agent
     /// 这里只做 Unity 侧能力执行，不包含任何 LLM 请求、Prompt 或 Agent 决策逻辑。
     /// JSON 解析/构造统一使用 LitJson/AgentJson。
     ///
-    /// 2026-06 修复点：
-    /// 1. compile_temp_method 不再把 AI 生成代码插入主 AITempCommands.cs，改为 partial 分文件隔离。
-    /// 2. 对 code 字段做源码级标准化，修复 LLM/JSON 双重转义导致的 \" 被原样写入 C# 文件的问题。
-    /// 3. 编译失败时删除本次生成文件并触发刷新，避免一个坏方法污染整个 Editor 编译域。
+    /// 生成源码使用独立文件、危险片段拒绝、事务编译和失败回滚；编译与执行严格分离。
     /// </summary>
     public static class AgentToolRouter
     {
-        private static bool _isWaitingCompile = false;
-        private static string _pendingCompileTarget = null;
-        private static string _pendingCompileKind = null; // method / type
-        private static double _compileStartTime = 0;
-        private const double COMPILE_TIMEOUT_SECONDS = 90.0;
-
         private static readonly string[] ForbiddenCodeFragments =
         {
             "Process.Start",
+            "Process.",
+            "System.Diagnostics",
             "System.Diagnostics.Process",
+            "System.Net",
+            "HttpClient",
+            "WebClient",
+            "TcpClient",
+            "UdpClient",
+            "Socket",
+            "UnityWebRequest",
+            "DllImport",
+            "LibraryImport",
+            "NativeLibrary",
+            "System.Reflection",
+            "System.Reflection.Emit",
+            "Assembly.Load",
+            "AssemblyLoadContext",
+            "AppDomain.CreateDomain",
+            "AppDomain.",
+            "Environment.",
+            "Environment.Exit",
+            "Environment.FailFast",
             "Application.Quit",
+            "Application.OpenURL",
             "EditorApplication.Exit",
+            "System.IO",
+            "File.",
+            "Directory.",
+            "FileInfo",
+            "DirectoryInfo",
+            "FileUtil.",
             "Directory.Delete",
+            "Directory.Move",
+            "File.Move",
+            "File.Replace",
             "File.Delete(\"/",
             "File.Delete(\"C:",
             "File.Delete(\"D:",
-            "EditorApplication.update +="
+            "AssetDatabase.DeleteAsset",
+            "AssetDatabase.MoveAsset",
+            "EditorApplication.update",
+            "EditorApplication.delayCall",
+            "AssemblyReloadEvents",
+            "CompilationPipeline",
+            "InitializeOnLoad",
+            "DidReloadScripts",
+            "AssetPostprocessor",
+            "AssetModificationProcessor",
+            "InitializeOnEnterPlayMode",
+            "EditorPrefs.",
+            "SessionState.",
+            "Task.Run",
+            "Task.Factory",
+            "System.Threading",
+            "unsafe",
+            "stackalloc",
+            "#pragma",
+            "#if",
+            "#define"
         };
-
-        private static void SaveCompileState(bool isWaiting, string target, string kind, double startTime, string sourcePath)
-        {
-            _isWaitingCompile = isWaiting;
-            _pendingCompileTarget = target;
-            _pendingCompileKind = kind;
-            _compileStartTime = startTime;
-            EditorPrefs.SetBool("ATR_IsWaiting", isWaiting);
-            EditorPrefs.SetString("ATR_Target", target ?? "");
-            EditorPrefs.SetString("ATR_Kind", kind ?? "");
-            EditorPrefs.SetFloat("ATR_StartTime", (float)startTime);
-            EditorPrefs.SetString("ATR_SourcePath", sourcePath ?? "");
-        }
-
-        private static void ClearCompileState()
-        {
-            SaveCompileState(false, null, null, 0, null);
-        }
 
         private static IEngineBridge Bridge => UnityEngineBridge.Instance;
 
@@ -104,6 +129,12 @@ namespace AIBridge.Agent
             string cls = AgentJson.GetString(argsData, "className");
             string method = AgentJson.GetString(argsData, "methodName");
             string[] args = AgentJson.GetStringArray(argsData, "args");
+
+            if (IsGeneratedCommand(cls, method) && !AIBridgeSettings.GetOrCreateSettings().AllowGeneratedCodeExecution)
+            {
+                return BuildError("出于安全考虑，AI 生成的 C# 默认只允许编译，不允许自动执行。请在 AIBridge 配置中显式开启“允许自动执行生成代码”，或从命令面板手动执行。");
+            }
+
             JsonData payload = AgentJson.NewObject();
             payload["ClassName"] = cls;
             payload["MethodName"] = method;
@@ -116,7 +147,7 @@ namespace AIBridge.Agent
             JsonData argsData = AgentJson.ParseObject(argsJson);
             string methodName = AgentJson.GetString(argsData, "methodName");
             string code = NormalizeGeneratedSource(AgentJson.GetString(argsData, "code"));
-            string[] runArgs = AgentJson.GetStringArray(argsData, "args");
+            string operationId = AgentJson.GetString(argsData, "_operationId");
 
             if (string.IsNullOrEmpty(methodName) || string.IsNullOrEmpty(code))
                 return BuildError("methodName 或 code 字段不能为空");
@@ -125,21 +156,22 @@ namespace AIBridge.Agent
             if (!CodeDeclaresMethod(code, methodName))
                 return BuildError("code 字段中没有声明目标方法：" + methodName + "。请让 code 包含完整的 public static 方法声明。");
 
-            string safetyError = ValidateGeneratedCode(code);
+            string safetyError = ValidateGeneratedCode(code, "AITempCommands");
             if (!string.IsNullOrEmpty(safetyError)) return BuildError(safetyError);
+            if (ContainsTypeOrNamespaceDeclaration(code))
+                return BuildError("临时方法只能包含一个方法声明，不能额外声明类型或命名空间");
+            if (!HasBalancedBraces(code))
+                return BuildError("临时方法的大括号不平衡，拒绝写入源码");
 
             if (IsTempMethodLoaded(methodName))
             {
-                JsonData payload = AgentJson.NewObject();
-                payload["ClassName"] = "AIBridge.Agent.AITempCommands";
-                payload["MethodName"] = methodName;
-                payload["Args"] = AgentJson.StringArray(runArgs);
-                string execResult = AgentBridge.ExecuteCommandJson(JsonMapper.ToJson(payload));
                 JsonData response = AgentJson.NewObject();
                 response["Success"] = true;
                 response["Skipped"] = true;
-                response["Message"] = "方法 " + methodName + " 已存在并已加载，已跳过编译直接执行";
-                response["ExecuteResult"] = JsonMapper.ToObject(execResult);
+                response["Status"] = "done";
+                response["Message"] = "方法 " + methodName + " 已存在并已加载。编译工具不会隐式执行代码，请单独调用 execute_command。";
+                response["TargetMethod"] = methodName;
+                response["TargetClass"] = "AIBridge.Agent.AITempCommands";
                 return JsonMapper.ToJson(response);
             }
 
@@ -148,20 +180,13 @@ namespace AIBridge.Agent
             string sourcePath = Path.Combine(generatedDir, "AITempCommands_" + SanitizeFileName(methodName) + ".cs");
             string sourceText = BuildGeneratedTempCommandFile(methodName, code);
 
-            CompileWatcher.Reset();
-            File.WriteAllText(sourcePath, sourceText, Encoding.UTF8);
-            AssetDatabase.Refresh();
-            SaveCompileState(true, methodName, "method", EditorApplication.timeSinceStartup, sourcePath);
-
-            JsonData result = AgentJson.NewObject();
-            result["Success"] = true;
-            result["Status"] = "compiling";
-            result["Message"] = "已将方法 " + methodName + " 写入独立 partial 文件并触发编译，请调用 check_compile_status 轮询编译结果";
-            result["TargetMethod"] = methodName;
-            result["TargetClass"] = "AIBridge.Agent.AITempCommands";
-            result["SourcePath"] = ToAssetRelativePath(sourcePath);
-            result["Args"] = AgentJson.StringArray(runArgs);
-            return JsonMapper.ToJson(result);
+            return CompileTransactionManager.BeginGeneratedSource(
+                operationId,
+                sourcePath,
+                sourceText,
+                "method",
+                methodName,
+                "AIBridge.Agent.AITempCommands");
         }
 
         private static string HandleReadCommandSource(string argsJson)
@@ -213,16 +238,20 @@ namespace AIBridge.Agent
             JsonData argsData = AgentJson.ParseObject(argsJson);
             string filename = AgentJson.GetString(argsData, "filename");
             string code = NormalizeGeneratedSource(AgentJson.GetString(argsData, "code"));
+            string operationId = AgentJson.GetString(argsData, "_operationId");
 
             if (string.IsNullOrEmpty(filename) || string.IsNullOrEmpty(code))
                 return BuildError("filename 或 code 字段不能为空");
 
-            string safetyError = ValidateGeneratedCode(code);
-            if (!string.IsNullOrEmpty(safetyError)) return BuildError(safetyError);
-
             if (!filename.EndsWith(".cs", StringComparison.OrdinalIgnoreCase)) filename += ".cs";
             filename = SanitizeFileName(Path.GetFileNameWithoutExtension(filename)) + ".cs";
             string typeName = Path.GetFileNameWithoutExtension(filename);
+            string safetyError = ValidateGeneratedCode(code, typeName);
+            if (!string.IsNullOrEmpty(safetyError)) return BuildError(safetyError);
+            if (!CodeDeclaresType(code, typeName))
+                return BuildError("源码必须声明与文件同名的 class/struct：" + typeName);
+            if (!HasBalancedBraces(code))
+                return BuildError("脚本的大括号不平衡，拒绝写入源码");
             string scriptsDir = Path.Combine(Application.dataPath, "Scripts", "AITemp");
             string scriptPath = Path.Combine(scriptsDir, filename);
 
@@ -241,124 +270,21 @@ namespace AIBridge.Agent
             }
 
             if (!Directory.Exists(scriptsDir)) Directory.CreateDirectory(scriptsDir);
-            CompileWatcher.Reset();
-            File.WriteAllText(scriptPath, code, Encoding.UTF8);
-            AssetDatabase.Refresh();
-            SaveCompileState(true, typeName, "type", EditorApplication.timeSinceStartup, scriptPath);
-
-            JsonData result = AgentJson.NewObject();
-            result["Success"] = true;
-            result["Status"] = "compiling";
-            result["Message"] = "已写入或重新触发脚本 " + filename + " 编译，请调用 check_compile_status 轮询编译结果";
-            result["TypeName"] = typeName;
-            result["SourcePath"] = ToAssetRelativePath(scriptPath);
-            return JsonMapper.ToJson(result);
+            return CompileTransactionManager.BeginGeneratedSource(
+                operationId,
+                scriptPath,
+                code,
+                "type",
+                typeName,
+                typeName);
         }
 
         private static string HandleCheckCompileStatus(string argsJson)
         {
-            if (!_isWaitingCompile && EditorPrefs.GetBool("ATR_IsWaiting", false))
-            {
-                _isWaitingCompile = true;
-                _pendingCompileTarget = EditorPrefs.GetString("ATR_Target", "");
-                _pendingCompileKind = EditorPrefs.GetString("ATR_Kind", "");
-                _compileStartTime = EditorPrefs.GetFloat("ATR_StartTime", 0f);
-            }
-
-            if (!_isWaitingCompile)
-            {
-                if (!CompileWatcher.LastCompileSucceeded)
-                {
-                    JsonData err = AgentJson.NewObject();
-                    err["Status"] = "error";
-                    err["Success"] = false;
-                    err["Message"] = "最近一次编译失败";
-                    err["CompileErrors"] = JsonMapper.ToObject(CompileWatcher.GetErrorsJson());
-                    return JsonMapper.ToJson(err);
-                }
-                JsonData idle = AgentJson.NewObject();
-                idle["Status"] = "idle";
-                idle["Success"] = true;
-                idle["Message"] = "当前没有进行中的编译任务";
-                return JsonMapper.ToJson(idle);
-            }
-
-            double elapsed = EditorApplication.timeSinceStartup - _compileStartTime;
-            string kind = _pendingCompileKind;
-            string targetName = _pendingCompileTarget;
-
-            if (elapsed > COMPILE_TIMEOUT_SECONDS)
-            {
-                ClearCompileState();
-                JsonData timeout = AgentJson.NewObject();
-                timeout["Status"] = "timeout";
-                timeout["Success"] = false;
-                timeout["Message"] = "编译等待超时，目标：" + targetName;
-                timeout["CompileErrors"] = JsonMapper.ToObject(CompileWatcher.GetErrorsJson());
-                return JsonMapper.ToJson(timeout);
-            }
-
-            if (EditorApplication.isCompiling)
-            {
-                JsonData compiling = AgentJson.NewObject();
-                compiling["Status"] = "compiling";
-                compiling["Success"] = true;
-                compiling["Message"] = "Unity 正在编译中，请稍后再次调用 check_compile_status";
-                compiling["ElapsedSeconds"] = elapsed;
-                return JsonMapper.ToJson(compiling);
-            }
-
-            if (!CompileWatcher.LastCompileSucceeded)
-            {
-                string rollbackMessage = RollbackPendingGeneratedSource();
-                ClearCompileState();
-                JsonData err = AgentJson.NewObject();
-                err["Status"] = "error";
-                err["Success"] = false;
-                err["Message"] = "编译失败，已回滚本次生成文件。请修正代码后重试";
-                err["Rollback"] = rollbackMessage;
-                err["CompileErrors"] = JsonMapper.ToObject(CompileWatcher.GetErrorsJson());
-                return JsonMapper.ToJson(err);
-            }
-
-            bool ready = false;
-            if (kind == "type")
-            {
-                ready = AgentUtility.IsTypeLoaded(targetName);
-            }
-            else if (kind == "method")
-            {
-                AgentCommandRegistry.Invalidate();
-                AgentCommandRegistry.Scan();
-                if (IsTempMethodLoaded(targetName)) ready = true;
-            }
-
-            if (!ready)
-            {
-                JsonData wait = AgentJson.NewObject();
-                wait["Status"] = "compiling";
-                wait["Success"] = true;
-                wait["Message"] = "编译已完成但目标尚未加载，Domain Reload 可能仍在进行，请稍后再次调用";
-                wait["ElapsedSeconds"] = elapsed;
-                return JsonMapper.ToJson(wait);
-            }
-
-            ClearCompileState();
-            JsonData done = AgentJson.NewObject();
-            done["Status"] = "done";
-            done["Success"] = true;
-            if (kind == "method")
-            {
-                done["Message"] = "方法 " + targetName + " 编译完成并已注册，现在可以调用 execute_command 执行";
-                done["TargetMethod"] = targetName;
-                done["TargetClass"] = "AIBridge.Agent.AITempCommands";
-            }
-            else
-            {
-                done["Message"] = "脚本 " + targetName + " 编译完成，现在可以调用 execute_command AttachScriptToGameObject 挂载";
-                done["TypeName"] = targetName;
-            }
-            return JsonMapper.ToJson(done);
+            JsonData args = AgentJson.ParseObject(argsJson);
+            string operationId = AgentJson.GetString(args, "operationId");
+            bool final;
+            return CompileTransactionManager.GetStatusJson(operationId, out final);
         }
 
         private static bool TryParseVector3(string s, out Vector3 vec)
@@ -495,8 +421,10 @@ namespace AIBridge.Agent
             string dir = Path.Combine(Application.dataPath, "Materials");
             if (!Directory.Exists(dir)) Directory.CreateDirectory(dir);
 
-            string assetPath = "Assets/Materials/" + materialName + ".mat";
+            materialName = SanitizeFileName(Path.GetFileNameWithoutExtension(materialName));
+            string assetPath = AssetDatabase.GenerateUniqueAssetPath("Assets/Materials/" + materialName + ".mat");
             AssetDatabase.CreateAsset(mat, assetPath);
+            Undo.RegisterCreatedObjectUndo(mat, "Create " + materialName);
             AssetDatabase.SaveAssets();
             AssetDatabase.Refresh();
 
@@ -706,7 +634,6 @@ namespace AIBridge.Agent
                 "// One generated method per file prevents bad AI code from corrupting AITempCommands.cs.\n" +
                 "// </auto-generated>\n" +
                 "using System;\n" +
-                "using System.IO;\n" +
                 "using System.Linq;\n" +
                 "using System.Collections.Generic;\n" +
                 "using UnityEngine;\n" +
@@ -747,32 +674,6 @@ namespace AIBridge.Agent
             return method != null;
         }
 
-        private static string RollbackPendingGeneratedSource()
-        {
-            string sourcePath = EditorPrefs.GetString("ATR_SourcePath", "");
-            if (string.IsNullOrEmpty(sourcePath)) return "没有记录本次生成文件，未执行文件回滚";
-            try
-            {
-                string full = Path.GetFullPath(sourcePath);
-                string assets = Path.GetFullPath(Application.dataPath);
-                bool underProjectAssets = full.StartsWith(assets, StringComparison.OrdinalIgnoreCase);
-                if (!underProjectAssets) return "拒绝删除 Assets 目录外文件：" + sourcePath;
-                if (File.Exists(full))
-                {
-                    File.Delete(full);
-                    string meta = full + ".meta";
-                    if (File.Exists(meta)) File.Delete(meta);
-                    AssetDatabase.Refresh();
-                    return "已删除本次生成文件：" + ToAssetRelativePath(full);
-                }
-                return "本次生成文件不存在，无需删除：" + sourcePath;
-            }
-            catch (Exception ex)
-            {
-                return "回滚失败：" + ex.Message;
-            }
-        }
-
         private static string GetGeneratedCommandsDir()
         {
             return Path.Combine(Application.dataPath, "Editor", "AITempCommandsGenerated");
@@ -804,6 +705,19 @@ namespace AIBridge.Agent
             return true;
         }
 
+        private static bool IsGeneratedCommand(string className, string methodName)
+        {
+            if (string.Equals(className, "AIBridge.Agent.AITempCommands", StringComparison.Ordinal) ||
+                string.Equals(className, "AITempCommands", StringComparison.Ordinal)) return true;
+            Type type = AgentUtility.ResolveType(className);
+            if (type == null) return false;
+            MethodInfo method = type.GetMethod(methodName,
+                BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static);
+            if (method == null) return false;
+            AgentCommandAttribute attribute = method.GetCustomAttribute<AgentCommandAttribute>();
+            return attribute != null && string.Equals(attribute.Category, "Temp", StringComparison.OrdinalIgnoreCase);
+        }
+
         private static string ToAssetRelativePath(string fullPath)
         {
             try
@@ -817,7 +731,7 @@ namespace AIBridge.Agent
             return fullPath;
         }
 
-        private static string ValidateGeneratedCode(string code)
+        private static string ValidateGeneratedCode(string code, string targetTypeName)
         {
             if (string.IsNullOrEmpty(code)) return "生成代码为空";
             for (int i = 0; i < ForbiddenCodeFragments.Length; i++)
@@ -829,7 +743,103 @@ namespace AIBridge.Agent
             if (LooksOverEscaped(code))
                 return "生成代码仍疑似包含过度转义的引号，请重新生成 code 字段";
 
+            string stripped = StripCommentsAndStrings(code);
+            if (!string.IsNullOrEmpty(targetTypeName) &&
+                Regex.IsMatch(stripped, @"\bstatic\s+" + Regex.Escape(targetTypeName) + @"\s*\(", RegexOptions.IgnoreCase))
+                return "生成代码包含静态构造函数，可能在脚本加载时产生副作用";
+
             return null;
+        }
+
+        private static bool CodeDeclaresType(string code, string typeName)
+        {
+            string stripped = StripCommentsAndStrings(code);
+            return Regex.IsMatch(stripped,
+                @"\b(class|struct)\s+" + Regex.Escape(typeName) + @"\b",
+                RegexOptions.CultureInvariant);
+        }
+
+        private static bool ContainsTypeOrNamespaceDeclaration(string code)
+        {
+            string stripped = StripCommentsAndStrings(code);
+            return Regex.IsMatch(stripped, @"\b(class|struct|interface|enum|namespace)\b");
+        }
+
+        private static bool HasBalancedBraces(string code)
+        {
+            string stripped = StripCommentsAndStrings(code);
+            int depth = 0;
+            for (int i = 0; i < stripped.Length; i++)
+            {
+                if (stripped[i] == '{') depth++;
+                else if (stripped[i] == '}')
+                {
+                    depth--;
+                    if (depth < 0) return false;
+                }
+            }
+            return depth == 0;
+        }
+
+        private static string StripCommentsAndStrings(string code)
+        {
+            if (string.IsNullOrEmpty(code)) return "";
+            StringBuilder result = new StringBuilder(code.Length);
+            bool lineComment = false;
+            bool blockComment = false;
+            bool inString = false;
+            bool inChar = false;
+            bool verbatim = false;
+
+            for (int i = 0; i < code.Length; i++)
+            {
+                char c = code[i];
+                char next = i + 1 < code.Length ? code[i + 1] : '\0';
+                if (lineComment)
+                {
+                    if (c == '\n') { lineComment = false; result.Append('\n'); }
+                    else result.Append(' ');
+                    continue;
+                }
+                if (blockComment)
+                {
+                    if (c == '*' && next == '/')
+                    {
+                        result.Append("  ");
+                        i++;
+                        blockComment = false;
+                    }
+                    else result.Append(c == '\n' ? '\n' : ' ');
+                    continue;
+                }
+                if (inString)
+                {
+                    result.Append(c == '\n' ? '\n' : ' ');
+                    if (verbatim && c == '"' && next == '"') { result.Append(' '); i++; continue; }
+                    if (c == '"' && (verbatim || !IsEscaped(code, i))) { inString = false; verbatim = false; }
+                    continue;
+                }
+                if (inChar)
+                {
+                    result.Append(' ');
+                    if (c == '\'' && !IsEscaped(code, i)) inChar = false;
+                    continue;
+                }
+                if (c == '/' && next == '/') { result.Append("  "); i++; lineComment = true; continue; }
+                if (c == '/' && next == '*') { result.Append("  "); i++; blockComment = true; continue; }
+                if (c == '@' && next == '"') { result.Append("  "); i++; inString = true; verbatim = true; continue; }
+                if (c == '"') { result.Append(' '); inString = true; continue; }
+                if (c == '\'') { result.Append(' '); inChar = true; continue; }
+                result.Append(c);
+            }
+            return result.ToString();
+        }
+
+        private static bool IsEscaped(string text, int index)
+        {
+            int slashes = 0;
+            for (int i = index - 1; i >= 0 && text[i] == '\\'; i--) slashes++;
+            return slashes % 2 != 0;
         }
 
         private static string BuildError(string message, Exception ex = null)

@@ -1,10 +1,10 @@
 namespace AIBridge.Core
 {
     /// <summary>
-    /// AI Bridge HTTP 协议常量。
+    /// AI Bridge 工具协议常量。
     /// 
-    /// 定义了 Python Agent 与引擎端桥接服务之间的 HTTP 端点路径、
-    /// JSON 字段名和工具名称常量，确保 Python 侧和 C# 侧使用一致的协议。
+    /// 定义 JSON 字段名和工具名称。HTTP 端点与端口常量仅为 1.x API 兼容保留，
+    /// 2.x 纯 C# Agent 不会监听或连接这些端点。
     /// 
     /// 各引擎的 HTTP 桥接服务实现必须遵守这些端点规范。
     /// </summary>
@@ -98,10 +98,10 @@ namespace AIBridge.Core
         /// <summary>引擎桥接 HTTP 端口范围。</summary>
         public const int BRIDGE_PORT_SPAN = 2000;
 
-        /// <summary>Python Agent Service 端口基址（11000-12999）。</summary>
+        /// <summary>1.x 服务端口基址；纯 C# 模式不使用。</summary>
         public const int SERVICE_PORT_BASE = 11000;
 
-        /// <summary>Python Agent Service 端口范围。</summary>
+        /// <summary>1.x 服务端口范围；纯 C# 模式不使用。</summary>
         public const int SERVICE_PORT_SPAN = 2000;
     }
 }

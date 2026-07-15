@@ -1,56 +1,43 @@
-# AI Bridge API 与自定义命令开发指南
+# API 与扩展指南
 
-向 AI Agent 暴露自定义的 Unity 编辑器任务极其简单，只需要使用 `[AgentCommand]` 特性声明即可。
+## 注册命令
 
-## 1. 暴露自定义 C# 方法
-要注册一个自定义命令：
-1. 在 Editor 脚本中（或任何运行时脚本中）编写一个 `public static`（公共静态）方法。
-2. 为该方法标上 `[AgentCommand("任务的功能描述", category: "分类名称")]` 特性。
-3. 方法的返回值推荐使用 `string` 类型，以便向 AI 返回执行日志或状态反馈。
+在 Editor 或 Runtime 程序集中声明公有静态方法，并添加 `[AgentCommand]`：
 
-### 代码示例
 ```csharp
-using UnityEngine;
-using UnityEditor;
 using AIBridge.Agent;
+using UnityEditor;
+using UnityEngine;
 
-namespace AIBridge.Agent
+public static class MyEditorCommands
 {
-    public static class LevelDesignCommands
+    [AgentCommand("创建一个可撤销的空物体", category: "Custom")]
+    public static string CreateObject(string objectName)
     {
-        [AgentCommand("为选中的 GameObject 批量添加随机点光源", category: "Level Design")]
-        public static string AddLightsToSelection(float intensity, string colorHex)
-        {
-            var selectedObjects = Selection.gameObjects;
-            if (selectedObjects.Length == 0)
-            {
-                return "Failed: 当前场景中没有选中任何 GameObject。";
-            }
-
-            Color lightColor = Color.white;
-            ColorUtility.TryParseHtmlString(colorHex, out lightColor);
-
-            int count = 0;
-            foreach (var go in selectedObjects)
-            {
-                Light light = go.AddComponent<Light>();
-                light.intensity = intensity;
-                light.color = lightColor;
-                count++;
-            }
-
-            return $"Success: 成功为 {count} 个选中的 GameObject 添加了 Light 组件。";
-        }
+        GameObject value = new GameObject(string.IsNullOrEmpty(objectName) ? "Generated" : objectName);
+        Undo.RegisterCreatedObjectUndo(value, "Create object");
+        return value.name;
     }
 }
 ```
 
----
+Agent 在脚本域加载后扫描命令。参数应使用简单、可验证的类型，方法应支持 Undo、避免访问项目外路径，并尽量可重复调用。
 
-## 2. 参数解析与类型转换规则
-C# HTTP 桥接服务端（`AgentBridge.cs`）会自动解析从 Python 传入的参数，并自动匹配和转换到方法的形参：
-* **基础类型**：支持自动解析 `int`、`float`、`double`、`bool`、`string` 以及 `enum`（枚举，不区分大小写）。
-* **UnityEngine 常用类型**：
-  * `Vector2`、`Vector3`、`Vector4`、`Color`、`Quaternion`、`Bounds`（支持从标准字符串格式或 JSON 数组自动转换）。
-  * `GameObject`：系统会自动使用 `GameObject.Find()` 在当前场景中查找对应名称的 GameObject 并自动传入。
-* **后备方案**：支持传入复杂的 JSON 字符串，您可以在方法内使用 `JsonMapper` (LitJson) 自行反序列化。
+## 固定工具
+
+工具 Schema 位于 `Editor/AgentTools.json`，路由实现在 `AgentToolRouter`。新增工具时需要：
+
+1. 在 `BridgeProtocol` 增加稳定名称。
+2. 在 Schema 中描述参数和必填项。
+3. 在路由器实现主线程逻辑、参数验证、Undo 和结构化 JSON 结果。
+4. 明确工具是否有副作用；不要把长任务、网络或后台线程藏在工具中。
+
+## 编译工具
+
+生成代码必须通过 `CompileTransactionManager.BeginGeneratedSource`，不能先写文件再保存状态。调用者提供稳定 `operationId`、目标文件、目标类型/方法；结果为 `compiling` 时由 Agent 宿主等待最终事务结果。
+
+编译工具不得隐式执行目标方法。执行必须作为后续独立工具调用，并遵守生成代码执行开关。
+
+## 状态兼容
+
+持久化阶段使用字符串常量，新增字段应提供安全默认值。不要把 API Key、令牌或完整敏感响应写入 `AgentSessionState`。

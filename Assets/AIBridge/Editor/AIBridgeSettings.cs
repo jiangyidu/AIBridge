@@ -20,6 +20,7 @@ namespace AIBridge.Agent
         [SerializeField] private string userSystemPrompt = "";
         [SerializeField] private int maxSteps = 30;
         [SerializeField] private bool showReasoning = true;
+        [SerializeField] private bool allowGeneratedCodeExecution = false;
 
         public int Mode { get { return mode; } set { mode = value; Save(); } }
         public int Provider { get { return provider; } set { provider = value; Save(); } }
@@ -30,6 +31,40 @@ namespace AIBridge.Agent
         public string UserSystemPrompt { get { return userSystemPrompt; } set { userSystemPrompt = value; Save(); } }
         public int MaxSteps { get { return maxSteps; } set { maxSteps = value; Save(); } }
         public bool ShowReasoning { get { return showReasoning; } set { showReasoning = value; Save(); } }
+        public bool AllowGeneratedCodeExecution { get { return allowGeneratedCodeExecution; } set { allowGeneratedCodeExecution = value; Save(); } }
+
+        public void Apply(
+            int nextMode,
+            int nextProvider,
+            string nextBaseUrl,
+            string nextModelName,
+            string nextOllamaUrl,
+            string nextOllamaModel,
+            string nextUserSystemPrompt,
+            int nextMaxSteps,
+            bool nextShowReasoning,
+            bool nextAllowGeneratedCodeExecution)
+        {
+            bool changed = mode != nextMode || provider != nextProvider ||
+                baseUrl != (nextBaseUrl ?? "") || modelName != (nextModelName ?? "") ||
+                ollamaUrl != (nextOllamaUrl ?? "") || ollamaModel != (nextOllamaModel ?? "") ||
+                userSystemPrompt != (nextUserSystemPrompt ?? "") || maxSteps != nextMaxSteps ||
+                showReasoning != nextShowReasoning ||
+                allowGeneratedCodeExecution != nextAllowGeneratedCodeExecution;
+            if (!changed) return;
+
+            mode = nextMode;
+            provider = nextProvider;
+            baseUrl = nextBaseUrl ?? "";
+            modelName = nextModelName ?? "";
+            ollamaUrl = nextOllamaUrl ?? "";
+            ollamaModel = nextOllamaModel ?? "";
+            userSystemPrompt = nextUserSystemPrompt ?? "";
+            maxSteps = nextMaxSteps;
+            showReasoning = nextShowReasoning;
+            allowGeneratedCodeExecution = nextAllowGeneratedCodeExecution;
+            Save();
+        }
 
         public static AIBridgeSettings GetOrCreateSettings()
         {
