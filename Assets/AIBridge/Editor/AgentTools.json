@@ -1,0 +1,342 @@
+[
+  {
+    "type": "function",
+    "function": {
+      "name": "execute_command",
+      "description": "调用 Unity 中已通过 [AgentCommand] 注册的静态方法。用于创建物体、设置材质、挂载脚本、查询场景等预定义操作。调用前请先用 list_commands 确认命令存在。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "className": {
+            "type": "string",
+            "description": "目标类的完整类名，例如 AntigravityTasks 或 AIBridge.Agent.AntigravityTasks"
+          },
+          "methodName": {
+            "type": "string",
+            "description": "目标静态方法名，例如 CreateCube"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "方法参数列表（全部转为字符串），例如 [\"0\",\"5\",\"0\"]"
+          }
+        },
+        "required": [
+          "className",
+          "methodName"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compile_temp_method",
+      "description": "将一段 C# 静态方法代码写入独立 partial 临时命令文件并触发 Unity 编译。调用后会返回 {\"Status\":\"compiling\"}，必须调用 check_compile_status 轮询，直到 {\"Status\":\"done\"} 后再调用 execute_command。编译失败时 Unity 会删除本次生成文件以避免污染主 AITempCommands.cs。禁止在 code 中使用 EditorApplication.update 注册。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "methodName": {
+            "type": "string",
+            "description": "方法名（PascalCase，唯一）"
+          },
+          "code": {
+            "type": "string",
+            "description": "完整的 public static string MethodName() { ... } 方法代码。必须在方法定义上方显式声明 [AgentCommand(\"简明准确的方法描述。必须简明准确的交代方法作用、对场景的影响、参数限制条件、能做和不能做的能力边界以及任何副作用。\", category: \"Temp\")]。源码中的字符串请按 C# 正常写法表达，例如 GameObject.Find(\"TriangleCubesParent\")；不要额外转义。"
+          },
+          "args": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "编译后执行时传入的参数"
+          }
+        },
+        "required": [
+          "methodName",
+          "code"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "compile_script",
+      "description": "将一个完整的 MonoBehaviour C# 脚本文件写入 Assets/Scripts/AITemp/ 并触发 Unity 编译。调用后会返回 {\"Status\":\"compiling\"}，必须调用 check_compile_status 轮询，直到 {\"Status\":\"done\"} 后再调用 execute_command AttachScriptToGameObject 挂载脚本。编译失败时会删除本次生成文件。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filename": {
+            "type": "string",
+            "description": "脚本文件名（不含 .cs），例如 AIRotator"
+          },
+          "code": {
+            "type": "string",
+            "description": "完整的 .cs 文件内容，包含 using 语句 and class 定义，继承 MonoBehaviour"
+          },
+          "forceOverwrite": {
+            "type": "boolean",
+            "description": "如果脚本已存在且已加载，是否强制覆盖并重新编译。默认为 false。"
+          }
+        },
+        "required": [
+          "filename",
+          "code"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "check_compile_status",
+      "description": "查询当前 Unity 编译进度。在调用 compile_temp_method 或 compile_script 之后必须调用此工具轮询，直到收到 {\"Status\":\"done\"}（成功）或 {\"Status\":\"error\"}（失败）。收到 {\"Status\":\"compiling\"} 时请稍等片刻后再次调用。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "query_scene",
+      "description": "获取当前 Unity 场景的层级结构（所有顶级物体及子物体名称，深度2层）。在操作场景前务必先调用此工具，避免因物体名称错误导致操作失败。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "query_object",
+      "description": "获取场景中指定名称 GameObject 的详细信息：世界坐标、旋转、缩放、挂载的组件列表、子物体数量。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "objectName": {
+            "type": "string",
+            "description": "场景中 GameObject 的名称"
+          }
+        },
+        "required": [
+          "objectName"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "find_assets",
+      "description": "在 Unity 项目 Assets 目录中搜索资产文件路径。filter 格式示例：'AI_Mat t:Material'、'Hero t:Prefab'、'MyTexture t:Texture2D'。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "filter": {
+            "type": "string",
+            "description": "AssetDatabase.FindAssets 格式的搜索过滤字符串"
+          }
+        },
+        "required": [
+          "filter"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_commands",
+      "description": "列出当前已注册的全部 [AgentCommand] 命令（类名、方法名、描述）。在决定是否需要 compile_temp_method 之前，务必先调用此工具确认所需方法是否已存在。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "list_ai_scripts",
+      "description": "列出 Assets/Scripts/AITemp/ 目录下已有的 MonoBehaviour 脚本信息（包含脚本名称和类型是否已加载）。在 compile_script 之前先检查，避免重复生成同名脚本。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_compile_errors",
+      "description": "获取最近一次 Unity 编译产生的错误列表（文件名、行号、错误信息）。在 compile_temp_method 或 compile_script 之后如果怀疑编译失败，调用此工具查看详情并修正代码。",
+      "parameters": {
+        "type": "object",
+        "properties": {},
+        "required": []
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "get_console_logs",
+      "description": "获取 Unity Console 最近若干条日志（包含 Log / Warning / Error），用于诊断运行时行为或确认操作是否生效。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "count": {
+            "type": "integer",
+            "description": "返回日志条数，默认 10，最大 50"
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "read_command_source",
+      "description": "读取现有临时命令（[AgentCommand]）或 AI 脚本的源代码逻辑。当发现 list_commands 或 list_ai_scripts 中存在与当前需求相似功能的项时，必须先用此工具读取其实现代码，以评估是否可以直接复用或只需进行少量参数调整，从而避免重复生成逻辑。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "methodName": {
+            "type": "string",
+            "description": "已注册的 [AgentCommand] 方法名，例如 CreateTriangleCubesWithMover"
+          },
+          "scriptName": {
+            "type": "string",
+            "description": "已生成的 AI 脚本类名，例如 TriangleCubesMover"
+          }
+        }
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_gameobject",
+      "description": "在场景中创建基础 GameObject（如 Cube/Sphere/Cylinder/Plane/Empty），并指定其名称、位置、旋转、缩放和父物体。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "type": {
+            "type": "string",
+            "enum": ["Cube", "Sphere", "Cylinder", "Plane", "Empty"],
+            "description": "要创建的物体类型"
+          },
+          "name": {
+            "type": "string",
+            "description": "物体名称"
+          },
+          "position": {
+            "type": "string",
+            "description": "物体的世界坐标，格式为 'x,y,z'，例如 '0,5,0'，默认为 '0,0,0'"
+          },
+          "rotation": {
+            "type": "string",
+            "description": "物体的世界旋转角度，格式为 'x,y,z'，例如 '0,0,0'，默认为 '0,0,0'"
+          },
+          "scale": {
+            "type": "string",
+            "description": "物体的缩放大小，格式为 'x,y,z'，例如 '1,1,1'，默认为 '1,1,1'"
+          },
+          "parent": {
+            "type": "string",
+            "description": "父 GameObject 的名称（可选，若不填则创建在根目录下）"
+          }
+        },
+        "required": [
+          "type",
+          "name"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "create_material",
+      "description": "创建材质资源并保存到 Assets/Materials/ 文件夹下，支持指定 Shader 和主颜色。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "materialName": {
+            "type": "string",
+            "description": "材质资源名称（无需包含 .mat 后缀），例如 'Mat_Red_Standard'"
+          },
+          "shaderName": {
+            "type": "string",
+            "description": "Shader 名称，例如 'Standard' 或 'Universal Render Pipeline/Lit'，默认为 'Standard'"
+          },
+          "color": {
+            "type": "string",
+            "description": "材质的主颜色。支持 RGBA 格式 'r,g,b,a'（取值 0-1 之间）或十六进制 Hex 格式 '#RRGGBB'，例如 '1,0,0,1' 或 '#FF0000'"
+          }
+        },
+        "required": [
+          "materialName"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "set_material",
+      "description": "将指定的材质（通过路径或名称找到的 Material）应用到指定的 GameObject 的 Renderer 组件上。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "objectName": {
+            "type": "string",
+            "description": "场景中目标 GameObject 的名称"
+          },
+          "materialPath": {
+            "type": "string",
+            "description": "材质资产路径，例如 'Assets/Materials/Mat_Red_Standard.mat'，或者仅仅是材质文件名 'Mat_Red_Standard'"
+          }
+        },
+        "required": [
+          "objectName",
+          "materialPath"
+        ]
+      }
+    }
+  },
+  {
+    "type": "function",
+    "function": {
+      "name": "attach_script",
+      "description": "将已在 Unity 域中加载完毕的 MonoBehaviour 脚本（AI 生成的或项目自带的）挂载到场景中指定的 GameObject 上。",
+      "parameters": {
+        "type": "object",
+        "properties": {
+          "objectName": {
+            "type": "string",
+            "description": "场景中目标 GameObject 的名称"
+          },
+          "scriptName": {
+            "type": "string",
+            "description": "MonoBehaviour 脚本类名，例如 'TrianglePathMover'。确保类已加载（list_ai_scripts 中 compiled 为 true 或 check_compile_status 提示 done）"
+          }
+        },
+        "required": [
+          "objectName",
+          "scriptName"
+        ]
+      }
+    }
+  }
+]

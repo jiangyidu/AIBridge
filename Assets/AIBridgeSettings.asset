@@ -1,0 +1,23 @@
+%YAML 1.1
+%TAG !u! tag:unity3d.com,2011:
+--- !u!114 &11400000
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 0}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: d4b2094388225e947b4f9c80b2670ffb, type: 3}
+  m_Name: AIBridgeSettings
+  m_EditorClassIdentifier: 
+  mode: 1
+  provider: 0
+  baseUrl: https://api.deepseek.com
+  modelName: deepseek-chat
+  ollamaUrl: http://localhost:11434
+  ollamaModel: llama3
+  userSystemPrompt: 
+  maxSteps: 30
+  showReasoning: 1

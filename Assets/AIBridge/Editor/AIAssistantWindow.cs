@@ -1,0 +1,1511 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text;
+using LitJson;
+using UnityEditor;
+using UnityEngine;
+
+namespace AIBridge.Agent
+{
+    /// <summary>
+    /// Unity Editor AI 助手窗口。
+    /// 重构后：Unity UI 不再直接调用 LLM、不再解析 AI 文本动作、不再执行 Legacy ReAct。
+    /// 所有 AI 交互和 Agent 决策都交给 Python Agent Service；Unity 只负责显示、配置、启动会话和执行工具命令。
+    /// </summary>
+    public partial class AIAssistantWindow : EditorWindow
+    {
+        private enum LLMMode { RemoteAPI = 0, Ollama = 1 }
+        private enum APIProvider
+        {
+            DeepSeek = 0, MiniMax = 1, TongyiQianwen = 2,
+            Kimi = 3, ZhipuGLM = 4, Gemini = 5, Claude = 6, Custom = 7
+        }
+
+        [Serializable]
+        private class ChatMessage
+        {
+            public string role;
+            public string content;
+            public string reasoning_content;
+            public string time;
+        }
+
+        private static readonly string[] ProviderNames =
+        {
+            "DeepSeek", "MiniMax", "通义千问", "Kimi", "智谱 GLM", "Gemini", "Claude", "自定义"
+        };
+
+        private static readonly string[] ProviderURLs =
+        {
+            "https://api.deepseek.com",
+            "https://api.minimax.chat/v1",
+            "https://dashscope.aliyuncs.com/compatible-mode/v1",
+            "https://api.moonshot.cn/v1",
+            "https://open.bigmodel.cn/api/paas/v4",
+            "https://generativelanguage.googleapis.com/v1beta/openai",
+            "https://api.anthropic.com",
+            ""
+        };
+
+        private static readonly string[] ProviderModels =
+        {
+            "deepseek-v4-pro",
+            "MiniMax-Text-01",
+            "qwen-plus",
+            "moonshot-v1-8k",
+            "glm-4",
+            "gemini-2.0-flash",
+            "claude-3-5-sonnet-20241022",
+            ""
+        };
+
+        private string[] GetLocalizedProviderNames()
+        {
+            return new string[]
+            {
+                "DeepSeek",
+                "MiniMax",
+                AgentLocalization.Get("provider_tongyi", "通义千问"),
+                "Kimi",
+                AgentLocalization.Get("provider_zhipu", "智谱 GLM"),
+                "Gemini",
+                "Claude",
+                AgentLocalization.Get("provider_custom", "自定义")
+            };
+        }
+
+        private LLMMode _mode = LLMMode.RemoteAPI;
+        private APIProvider _provider = APIProvider.DeepSeek;
+        private string _apiKey = "";
+        private string _baseUrl = "";
+        private string _modelName = "";
+        private string _ollamaUrl = "http://localhost:11434";
+        private string _ollamaModel = "llama3";
+        private string _userSystemPrompt = "";
+        private int _maxSteps = 30;
+
+        private List<ChatMessage> _messages = new List<ChatMessage>();
+        private string _inputText = "";
+        private Vector2 _chatScroll;
+        private Vector2 _cmdScroll;
+        private bool _showConfig = true;
+        private bool _showCmdPanel = true;
+        private bool _showReasoning = true;
+        private bool _isWaiting = false;
+        private string _agentStepStatus = null;
+        private int _agentStepCount = 0;
+        private string _activeSessionId = null;
+        private int _lastEventId = 0;
+        private DateTime _lastHistoryLoad = DateTime.MinValue;
+        private double _nextEventPollTime = 0;
+        private int _consecutivePollFailures = 0;
+        private System.Diagnostics.Process _pythonServiceProcess = null;
+
+        private string[] _cmdArgs = new string[0];
+        private string[] _cmdArgValues = new string[0];
+        private string _selectedCmdKey = null;
+        private string _cmdSearchText = "";
+        private string _cmdCategoryFilter = "All";
+
+        private static string ProjectPath
+        {
+            get { return Path.GetDirectoryName(Application.dataPath); }
+        }
+
+        private static string AgentControllerDir
+        {
+            get { return Path.Combine(ProjectPath, "AgentController"); }
+        }
+
+        private static string HistoryPath
+        {
+            get { return Path.Combine(AgentControllerDir, "ai_chat_history.json"); }
+        }
+
+        private static string ServiceUrl
+        {
+            get { return PythonAgentClient.GetServiceUrl(ProjectPath); }
+        }
+
+        [MenuItem("AIBridge/AI Assistant")]
+        public static void ShowWindow()
+        {
+            var win = GetWindow<AIAssistantWindow>("AI Assistant");
+            win.titleContent = new GUIContent(AgentLocalization.Get("window_title", "AI Assistant"));
+            win.minSize = new Vector2(980, 620);
+        }
+
+        private void OnEnable()
+        {
+            AgentToolDefinitions.Init(Application.dataPath);
+            LoadPrefs();
+            LoadHistory();
+            _activeSessionId = EditorPrefs.GetString("AIAss_ActiveSessionId", "");
+            _lastEventId = EditorPrefs.GetInt("AIAss_LastEventId", 0);
+            // 不盲目恢复旧会话，避免上一次未正常结束的 Python 线程继续让 UI 卡在旧状态。
+            _isWaiting = !string.IsNullOrEmpty(_activeSessionId) && PythonAgentClient.IsHealthy(ServiceUrl);
+            if (!_isWaiting)
+            {
+                _activeSessionId = null;
+                _lastEventId = 0;
+                EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
+                EditorPrefs.DeleteKey("AIAss_LastEventId");
+            }
+            EditorApplication.update += OnEditorUpdate;
+        }
+
+        private void OnDisable()
+        {
+            SavePrefs();
+            EditorPrefs.SetString("AIAss_ActiveSessionId", _activeSessionId ?? "");
+            EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
+            EditorApplication.update -= OnEditorUpdate;
+        }
+
+        private void OnEditorUpdate()
+        {
+            // 不要每一帧都同步 HTTP 轮询 Python，否则会占用 Unity 主线程，
+            // 进而阻塞 AgentBridge.Update 处理 Python 发来的 /agent/tool 请求。
+            if (_isWaiting && !string.IsNullOrEmpty(_activeSessionId))
+            {
+                double now = EditorApplication.timeSinceStartup;
+                if (now >= _nextEventPollTime)
+                {
+                    _nextEventPollTime = now + 0.35;
+                    PollPythonAgentSession();
+                }
+            }
+        }
+
+        private void OnGUI()
+        {
+            ModernUI.Ensure();
+            titleContent = new GUIContent(AgentLocalization.Get("window_title", "AI Assistant"));
+            EditorGUI.DrawRect(new Rect(0, 0, position.width, position.height), ModernUI.Bg);
+
+            DrawToolbar();
+
+            EditorGUILayout.BeginHorizontal(ModernUI.PagePadding, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+            DrawChatPanel();
+            if (_showCmdPanel)
+            {
+                GUILayout.Space(12);
+                DrawCommandPanel();
+            }
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawToolbar()
+        {
+            EditorGUILayout.BeginVertical(ModernUI.TopBar, GUILayout.Height(86));
+
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(34));
+            EditorGUILayout.BeginVertical(GUILayout.Width(300));
+            GUILayout.Label(AgentLocalization.Get("window_title", "AI Assistant"), ModernUI.WindowTitle);
+            GUILayout.Label("Python Agent · Unity Command Bridge", ModernUI.WindowSubtitle);
+            EditorGUILayout.EndVertical();
+
+            GUILayout.FlexibleSpace();
+            string statusStr = _isWaiting
+                ? "● " + AgentLocalization.Get("status_running", "Running")
+                : "● " + AgentLocalization.Get("status_ready", "Ready");
+            GUILayout.Label(statusStr, _isWaiting ? ModernUI.StatusRunning : ModernUI.StatusOnline, GUILayout.Width(116), GUILayout.Height(24));
+            GUILayout.Space(8);
+
+            if (GUILayout.Button("▶ " + AgentLocalization.Get("btn_detect_service", "启动 / 检测"), ModernUI.PrimaryButton, GUILayout.Width(128), GUILayout.Height(28)))
+            {
+                DetectPythonAgentServiceAndReport();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(34));
+            GUILayout.Label(AgentLocalization.Get("mode_label", "模式"), ModernUI.ToolbarLabel, GUILayout.Width(48));
+            if (DrawTab(AgentLocalization.Get("mode_remote", "远程 API"), _mode == LLMMode.RemoteAPI, 92))
+            {
+                _mode = LLMMode.RemoteAPI;
+                SavePrefs();
+            }
+            if (DrawTab(AgentLocalization.Get("mode_ollama", "Ollama 本地"), _mode == LLMMode.Ollama, 104))
+            {
+                _mode = LLMMode.Ollama;
+                SavePrefs();
+            }
+            GUILayout.Label(AgentLocalization.Get("agent_badge", "Agent: Python"), ModernUI.AgentBadge, GUILayout.Width(116), GUILayout.Height(28));
+
+            GUILayout.FlexibleSpace();
+
+            _showConfig = GUILayout.Toggle(_showConfig, AgentLocalization.Get("toggle_config", "配置"), ModernUI.ToolbarToggle, GUILayout.Width(64), GUILayout.Height(26));
+            _showCmdPanel = GUILayout.Toggle(_showCmdPanel, AgentLocalization.Get("toggle_commands", "命令"), ModernUI.ToolbarToggle, GUILayout.Width(64), GUILayout.Height(26));
+
+            if (GUILayout.Button(AgentLocalization.Get("btn_clear_history", "清空历史"), ModernUI.SecondaryButton, GUILayout.Width(82), GUILayout.Height(26)))
+            {
+                if (EditorUtility.DisplayDialog(
+                    AgentLocalization.Get("dialog_confirm"),
+                    AgentLocalization.Get("dialog_clear_history_msg"),
+                    AgentLocalization.Get("dialog_ok"),
+                    AgentLocalization.Get("dialog_cancel")))
+                {
+                    _messages.Clear();
+                    SaveHistory();
+                }
+            }
+
+            if (_isWaiting)
+            {
+                if (GUILayout.Button(AgentLocalization.Get("btn_stop", "停止"), ModernUI.DangerButton, GUILayout.Width(64), GUILayout.Height(26)))
+                {
+                    StopPendingSession();
+                }
+            }
+
+            string langBtnLabel = AgentLocalization.CurrentLanguage == "zh" ? "EN" : "中";
+            if (GUILayout.Button(langBtnLabel, ModernUI.SecondaryButton, GUILayout.Width(42), GUILayout.Height(26)))
+            {
+                AgentLocalization.CurrentLanguage = AgentLocalization.CurrentLanguage == "zh" ? "en" : "zh";
+                AgentLocalization.LoadTranslations();
+                foreach (var win in Resources.FindObjectsOfTypeAll<AIAssistantWindow>()) win.Repaint();
+                foreach (var win in Resources.FindObjectsOfTypeAll<AIBridgeSetupWizard>()) win.Repaint();
+            }
+
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+        }
+
+        private bool DrawTab(string text, bool active, float width)
+        {
+            bool clicked = GUILayout.Button(text, active ? ModernUI.TabActive : ModernUI.TabNormal, GUILayout.Width(width), GUILayout.Height(28));
+            return clicked;
+        }
+
+        private void DetectPythonAgentServiceAndReport()
+        {
+            AddMessage("system", AgentLocalization.Get("msg_detecting_service", "正在检测 Python Agent Service 与 Unity 执行端..."));
+            SaveHistory();
+
+            bool serviceOk = false;
+            try
+            {
+                serviceOk = EnsurePythonAgentService();
+            }
+            catch (Exception ex)
+            {
+                AddMessage("assistant", AgentLocalization.GetFormat("msg_service_check_failed", ex.Message));
+            }
+
+            if (!serviceOk)
+            {
+                AddMessage("assistant", AgentLocalization.Get("msg_service_no_response", "Python Agent Service 未能启动或未响应。请检查 Python 路径、run_agent_service.py、端口占用和依赖安装。"));
+                SaveHistory();
+                Repaint();
+
+                if (EditorUtility.DisplayDialog(
+                    AgentLocalization.Get("dialog_env_error"),
+                    AgentLocalization.Get("dialog_env_error_msg"),
+                    AgentLocalization.Get("dialog_open_wizard"),
+                    AgentLocalization.Get("dialog_cancel")))
+                {
+                    AIBridgeSetupWizard.ShowWindow();
+                    this.Close();
+                }
+                return;
+            }
+
+            bool bridgeOk = false;
+            try
+            {
+                bridgeOk = AgentBridge.EnsureServerRunning();
+            }
+            catch (Exception ex)
+            {
+                AddMessage("assistant", AgentLocalization.GetFormat("msg_bridge_check_failed", ex.Message));
+            }
+
+            if (bridgeOk)
+            {
+                AddMessage("system", AgentLocalization.Get("msg_check_completed", "检测完成：Python Agent Service 正常，Unity 执行端可用。"));
+                EditorUtility.DisplayDialog(
+                    AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
+                    AgentLocalization.Get("dialog_detect_success", "检测成功：Python Agent Service 与 Unity 执行端均可用。"),
+                    AgentLocalization.Get("dialog_ok", "确定"));
+            }
+            else
+            {
+                AddMessage("assistant", AgentLocalization.Get("msg_bridge_not_ready", "Python Agent Service 已可用，但 Unity 执行端未就绪。发送任务前请确认 AgentBridge 服务能正常启动。"));
+                EditorUtility.DisplayDialog(
+                    AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
+                    AgentLocalization.Get("dialog_detect_bridge_not_ready", "Python Agent Service 可用，但 Unity 执行端未就绪。详情已写入会话。"),
+                    AgentLocalization.Get("dialog_ok", "确定"));
+            }
+
+            SaveHistory();
+            Repaint();
+        }
+
+        private void DrawChatPanel()
+        {
+            EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+
+            if (_showConfig)
+            {
+                DrawConfigPanel();
+                GUILayout.Space(10);
+            }
+
+            DrawConversationCard();
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawConfigPanel()
+        {
+            EditorGUILayout.BeginVertical(ModernUI.Card, GUILayout.ExpandWidth(true));
+
+            EditorGUILayout.BeginHorizontal();
+            string configTitle = AgentLocalization.Get("config_title_new", "Python 智能体配置");
+            string configSubtitle = AgentLocalization.Get("config_subtitle", "（Unity 只负责执行命令，不直接调用 LLM）");
+            GUILayout.Label(configTitle, ModernUI.CardTitle, GUILayout.Width(140));
+            GUILayout.Label(configSubtitle, ModernUI.CardSubtitle);
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+
+            GUILayout.Space(10);
+
+            if (_mode == LLMMode.RemoteAPI)
+            {
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+
+                int newProviderIndex = DrawPopupRow(AgentLocalization.Get("config_provider", "服务商"), (int)_provider, GetLocalizedProviderNames());
+                APIProvider newProvider = (APIProvider)newProviderIndex;
+                if (newProvider != _provider)
+                {
+                    _provider = newProvider;
+                    if (_provider != APIProvider.Custom)
+                    {
+                        _baseUrl = ProviderURLs[(int)_provider];
+                        _modelName = ProviderModels[(int)_provider];
+                    }
+                    SavePrefs();
+                }
+
+                _baseUrl = DrawTextRow(AgentLocalization.Get("config_base_url", "接口地址"), _baseUrl);
+                _modelName = DrawTextRow(AgentLocalization.Get("config_model", "模型名称"), _modelName);
+                EditorGUILayout.EndVertical();
+
+                GUILayout.Space(16);
+
+                EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+                _apiKey = DrawPasswordRow(AgentLocalization.Get("config_api_key", "接口密钥"), _apiKey);
+                DrawMaxStepRow();
+                DrawServiceRow();
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.EndHorizontal();
+            }
+            else
+            {
+                EditorGUILayout.BeginHorizontal();
+                EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+                _ollamaUrl = DrawTextRow(AgentLocalization.Get("config_ollama_url", "Ollama 地址"), _ollamaUrl);
+                _ollamaModel = DrawTextRow(AgentLocalization.Get("config_ollama_model", "Ollama 模型"), _ollamaModel);
+                EditorGUILayout.EndVertical();
+                GUILayout.Space(16);
+                EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
+                DrawMaxStepRow();
+                DrawServiceRow();
+                EditorGUILayout.EndVertical();
+                EditorGUILayout.EndHorizontal();
+            }
+
+            GUILayout.Space(8);
+            GUILayout.Label("▾ " + AgentLocalization.Get("config_system_prompt_label", "额外系统提示词"), ModernUI.SectionTitle);
+            _userSystemPrompt = EditorGUILayout.TextArea(_userSystemPrompt, ModernUI.TextArea, GUILayout.MinHeight(54), GUILayout.ExpandWidth(true));
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private int DrawPopupRow(string label, int value, string[] options)
+        {
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(label, ModernUI.FieldLabel, GUILayout.Width(92));
+            int newValue = EditorGUILayout.Popup(value, options, ModernUI.Popup, GUILayout.ExpandWidth(true), GUILayout.Height(24));
+            EditorGUILayout.EndHorizontal();
+            return newValue;
+        }
+
+        private string DrawTextRow(string label, string value)
+        {
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(label, ModernUI.FieldLabel, GUILayout.Width(92));
+            string newValue = EditorGUILayout.TextField(value, ModernUI.TextField, GUILayout.ExpandWidth(true), GUILayout.Height(24));
+            EditorGUILayout.EndHorizontal();
+            return newValue;
+        }
+
+        private string DrawPasswordRow(string label, string value)
+        {
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(label, ModernUI.FieldLabel, GUILayout.Width(92));
+            string newValue = EditorGUILayout.PasswordField(value, ModernUI.TextField, GUILayout.ExpandWidth(true), GUILayout.Height(24));
+            EditorGUILayout.EndHorizontal();
+            return newValue;
+        }
+
+        private void DrawMaxStepRow()
+        {
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(AgentLocalization.Get("config_max_steps", "最大执行步数"), ModernUI.FieldLabel, GUILayout.Width(92));
+            _maxSteps = EditorGUILayout.IntSlider(_maxSteps, 1, 80, GUILayout.ExpandWidth(true));
+            GUILayout.Label(_maxSteps.ToString(), ModernUI.NumberBadge, GUILayout.Width(40), GUILayout.Height(22));
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawServiceRow()
+        {
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(AgentLocalization.Get("config_python_service", "Python 服务"), ModernUI.FieldLabel, GUILayout.Width(92));
+            EditorGUILayout.SelectableLabel(ServiceUrl, ModernUI.MiniValue, GUILayout.Height(22), GUILayout.ExpandWidth(true));
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawConversationCard()
+        {
+            EditorGUILayout.BeginVertical(ModernUI.Card, GUILayout.ExpandWidth(true), GUILayout.ExpandHeight(true));
+
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+            GUILayout.Label(AgentLocalization.Get("conversation_title", "会话"), ModernUI.CardTitle, GUILayout.Width(56));
+            string sessionText = string.IsNullOrEmpty(_activeSessionId) ? "Session: -" : "Session: " + _activeSessionId;
+            GUILayout.Label(sessionText, ModernUI.CardSubtitle, GUILayout.MinWidth(260));
+            GUILayout.FlexibleSpace();
+            bool oldShowReasoning = _showReasoning;
+            _showReasoning = GUILayout.Toggle(_showReasoning, AgentLocalization.Get("toggle_show_reasoning", "显示思考过程"), ModernUI.Toggle, GUILayout.Width(150));
+            if (oldShowReasoning != _showReasoning)
+            {
+                SavePrefs();
+                Repaint();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            GUILayout.Space(6);
+
+            EditorGUILayout.BeginVertical(ModernUI.ChatViewport, GUILayout.ExpandHeight(true));
+            _chatScroll = EditorGUILayout.BeginScrollView(_chatScroll, GUILayout.ExpandHeight(true));
+            if (_messages.Count == 0)
+            {
+                GUILayout.Label(AgentLocalization.Get("empty_chat_hint", "输入任务后，Python Agent 会在这里显示执行过程与结果。"), ModernUI.EmptyHint, GUILayout.ExpandHeight(true));
+            }
+            else
+            {
+                for (int i = 0; i < _messages.Count; i++) DrawChatBubble(_messages[i]);
+            }
+
+            if (_isWaiting)
+            {
+                string status = !string.IsNullOrEmpty(_agentStepStatus)
+                    ? AgentLocalization.GetFormat("agent_executing", _agentStepStatus)
+                    : AgentLocalization.Get("agent_processing", "Python Agent 正在处理请求...");
+                GUILayout.Space(6);
+
+                // Graphical progress bar feedback
+                float progressVal = _maxSteps > 0 ? Mathf.Clamp01((float)_agentStepCount / _maxSteps) : 0.5f;
+                Rect r = EditorGUILayout.GetControlRect(false, 20);
+                EditorGUI.ProgressBar(r, progressVal, $"{status} ({_agentStepCount}/{_maxSteps})");
+                GUILayout.Space(4);
+            }
+            EditorGUILayout.EndScrollView();
+            EditorGUILayout.EndVertical();
+
+            // GUILayout.Space(8);
+            // DrawPromptTemplates();
+            GUILayout.Space(4);
+            DrawInputArea();
+            EditorGUILayout.EndVertical();
+        }
+
+        private struct MessageBlock
+        {
+            public bool isCode;
+            public string content;
+            public string language;
+        }
+
+        private static List<MessageBlock> ParseMessageBlocks(string text)
+        {
+            List<MessageBlock> blocks = new List<MessageBlock>();
+            if (string.IsNullOrEmpty(text)) return blocks;
+
+            string[] parts = text.Split(new string[] { "```" }, StringSplitOptions.None);
+            for (int i = 0; i < parts.Length; i++)
+            {
+                if (i % 2 == 0)
+                {
+                    if (!string.IsNullOrEmpty(parts[i]))
+                    {
+                        blocks.Add(new MessageBlock { isCode = false, content = parts[i] });
+                    }
+                }
+                else
+                {
+                    string block = parts[i];
+                    string lang = "";
+                    string code = block;
+
+                    int firstNewLine = block.IndexOf('\n');
+                    if (firstNewLine >= 0)
+                    {
+                        string possibleLang = block.Substring(0, firstNewLine).Trim();
+                        if (possibleLang.Length > 0 && possibleLang.Length < 15)
+                        {
+                            lang = possibleLang;
+                            code = block.Substring(firstNewLine + 1);
+                        }
+                    }
+
+                    blocks.Add(new MessageBlock { isCode = true, content = code, language = lang });
+                }
+            }
+            return blocks;
+        }
+
+        private void DrawChatBubble(ChatMessage msg)
+        {
+            bool isUser = msg.role == "user";
+            bool isSystem = msg.role == "system";
+            string rawContent = msg.content ?? "";
+
+            List<MessageBlock> blocks = new List<MessageBlock>();
+            if (!isUser && !isSystem && _showReasoning && !string.IsNullOrEmpty(msg.reasoning_content))
+            {
+                blocks.Add(new MessageBlock { isCode = false, content = "<b>[Reasoning Process]</b>" });
+                blocks.Add(new MessageBlock { isCode = true, content = msg.reasoning_content, language = "reasoning" });
+                blocks.Add(new MessageBlock { isCode = false, content = "<b>[Final Answer]</b>" });
+            }
+            blocks.AddRange(ParseMessageBlocks(rawContent));
+
+            float availableWidth = position.width - (_showCmdPanel ? 390f : 70f);
+            float width = Mathf.Clamp(availableWidth * 0.88f, 320f, 820f);
+            GUIStyle bodyStyle = ModernUI.MessageText;
+            GUIStyle bubbleStyle = isUser ? ModernUI.MsgUser : (isSystem ? ModernUI.MsgSystem : ModernUI.MsgAI);
+
+            EditorGUILayout.BeginHorizontal();
+            if (isUser) GUILayout.FlexibleSpace();
+
+            EditorGUILayout.BeginVertical(bubbleStyle, GUILayout.Width(width));
+            string roleName = isUser ? AgentLocalization.Get("role_user", "你") : (isSystem ? AgentLocalization.Get("role_system", "系统") : AgentLocalization.Get("role_ai", "AI"));
+            string time = string.IsNullOrEmpty(msg.time) ? "" : "  " + msg.time;
+            GUILayout.Label(roleName + time, ModernUI.MessageMeta);
+            GUILayout.Space(4);
+
+            foreach (var block in blocks)
+            {
+                if (string.IsNullOrEmpty(block.content)) continue;
+
+                if (block.isCode)
+                {
+                    EditorGUILayout.BeginHorizontal();
+                    string headerLabel = string.IsNullOrEmpty(block.language) ? "CODE" : block.language.ToUpper();
+                    GUILayout.Label($" ❖ {headerLabel}", ModernUI.CodeBlockHeader);
+                    GUILayout.FlexibleSpace();
+                    if (GUILayout.Button(AgentLocalization.Get("btn_copy", "复制"), ModernUI.CopyButton, GUILayout.Width(42), GUILayout.Height(18)))
+                    {
+                        EditorGUIUtility.systemCopyBuffer = block.content;
+                    }
+                    EditorGUILayout.EndHorizontal();
+                    GUILayout.Space(2);
+
+                    float codeHeight = ModernUI.CodeBlockText.CalcHeight(new GUIContent(block.content), width - 36f);
+                    codeHeight += 16f;
+
+                    EditorGUILayout.BeginVertical(ModernUI.CodeBlockBg);
+                    EditorGUILayout.SelectableLabel(block.content, ModernUI.CodeBlockText, GUILayout.Height(codeHeight), GUILayout.ExpandWidth(true));
+                    EditorGUILayout.EndVertical();
+                    GUILayout.Space(6);
+                }
+                else
+                {
+                    float textHeight = bodyStyle.CalcHeight(new GUIContent(block.content), width - 28f);
+                    textHeight += 12f;
+                    EditorGUILayout.SelectableLabel(block.content, bodyStyle, GUILayout.Height(textHeight), GUILayout.ExpandWidth(true));
+                    GUILayout.Space(4);
+                }
+            }
+
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button(AgentLocalization.Get("btn_copy_all", "复制全文"), ModernUI.CopyButton, GUILayout.Width(64), GUILayout.Height(20)))
+            {
+                string fullCopy = rawContent;
+                if (!isUser && !isSystem && !string.IsNullOrEmpty(msg.reasoning_content))
+                {
+                    fullCopy = msg.reasoning_content + "\n\n" + fullCopy;
+                }
+                EditorGUIUtility.systemCopyBuffer = fullCopy;
+            }
+            EditorGUILayout.EndHorizontal();
+            EditorGUILayout.EndVertical();
+
+            if (!isUser) GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+            GUILayout.Space(7);
+        }
+
+        //快捷方法，可以暂时留着
+        private void DrawPromptTemplates()
+        {
+            EditorGUILayout.BeginHorizontal();
+            GUILayout.Label(AgentLocalization.Get("templates_title", "快捷指令:"), ModernUI.MiniValue, GUILayout.Width(58), GUILayout.Height(20));
+            DrawPromptTemplateButton("📦 " + AgentLocalization.Get("template_create_cube", "创建立方体"), "在原点创建一个红色立方体");
+            DrawPromptTemplateButton("🔍 " + AgentLocalization.Get("template_check_hierarchy", "检查层级"), "检查当前场景的层级结构，告诉我有什么物体");
+            DrawPromptTemplateButton("🧹 " + AgentLocalization.Get("template_clean_scene", "清理场景"), "清理场景中临时生成的所有多余物体");
+            DrawPromptTemplateButton("📜 " + AgentLocalization.Get("template_create_script", "生成脚本"), "生成一个控制物体旋转的 MonoBehaviour 脚本并挂载到选中的物体上");
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawPromptTemplateButton(string label, string promptText)
+        {
+            if (GUILayout.Button(label, ModernUI.SecondaryButton, GUILayout.Height(20)))
+            {
+                _inputText = promptText;
+                GUI.FocusControl("AIAssistantInput");
+            }
+        }
+
+        private void DrawInputArea()
+        {
+            EditorGUILayout.BeginHorizontal(ModernUI.Composer, GUILayout.Height(82));
+            GUI.SetNextControlName("AIAssistantInput");
+            _inputText = EditorGUILayout.TextArea(_inputText, ModernUI.InputArea, GUILayout.MinHeight(68), GUILayout.ExpandWidth(true));
+            GUILayout.Space(8);
+
+            EditorGUILayout.BeginVertical(GUILayout.Width(110));
+            GUI.enabled = !_isWaiting && !string.IsNullOrEmpty((_inputText ?? "").Trim());
+            if (GUILayout.Button(_isWaiting ? AgentLocalization.Get("status_waiting", "等待中") : "✈ " + AgentLocalization.Get("btn_send", "发送"), ModernUI.PrimaryButton, GUILayout.Height(32)))
+            {
+                string text = _inputText.Trim();
+                _inputText = "";
+                GUI.FocusControl(null);
+                SendUserMessage(text);
+            }
+            GUI.enabled = true;
+
+            GUILayout.Space(6);
+            GUI.enabled = _isWaiting;
+            if (GUILayout.Button("■ " + AgentLocalization.Get("btn_stop", "停止"), ModernUI.DangerButton, GUILayout.Height(30)))
+            {
+                StopPendingSession();
+            }
+            GUI.enabled = true;
+            EditorGUILayout.EndVertical();
+            EditorGUILayout.EndHorizontal();
+        }
+
+        private void DrawCommandPanel()
+        {
+            EditorGUILayout.BeginVertical(ModernUI.Card, GUILayout.Width(332), GUILayout.ExpandHeight(true));
+
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.BeginVertical();
+            GUILayout.Label(AgentLocalization.Get("cmd_panel_title", "Unity 执行命令"), ModernUI.CardTitle);
+            GUILayout.Label(AgentLocalization.Get("cmd_panel_subtitle", "搜索、分类、手动执行 Unity 命令"), ModernUI.CardSubtitle);
+            EditorGUILayout.EndVertical();
+            GUILayout.FlexibleSpace();
+            if (GUILayout.Button(new GUIContent(
+                AgentLocalization.Get("btn_refresh", "刷新"),
+                AgentLocalization.Get("tooltip_refresh_cmds", "重新扫描 Unity 执行命令列表")),
+                ModernUI.SecondaryButton, GUILayout.Width(58), GUILayout.Height(26)))
+            {
+                AgentCommandRegistry.Scan();
+                AddMessage("system", AgentLocalization.Get("msg_commands_refreshed", "已刷新 Unity 执行命令列表。"));
+                SaveHistory();
+                Repaint();
+            }
+            EditorGUILayout.EndHorizontal();
+
+            GUILayout.Space(10);
+            _cmdSearchText = EditorGUILayout.TextField(_cmdSearchText, ModernUI.SearchField, GUILayout.Height(28));
+
+            GUILayout.Space(8);
+            EditorGUILayout.BeginHorizontal();
+            DrawCategoryChip("All", 54);
+            DrawCategoryChip("Scene", 58);
+            DrawCategoryChip("Json", 52);
+            DrawCategoryChip("Utility", 66);
+            GUILayout.FlexibleSpace();
+            EditorGUILayout.EndHorizontal();
+
+            GUILayout.Space(8);
+            EditorGUILayout.BeginVertical(ModernUI.CommandViewport, GUILayout.ExpandHeight(true));
+            _cmdScroll = EditorGUILayout.BeginScrollView(_cmdScroll, GUILayout.ExpandHeight(true));
+            var cmds = AgentCommandRegistry.Commands;
+            foreach (var kv in cmds)
+            {
+                AgentCommandInfo info = kv.Value;
+                if (!CommandMatchesSearch(info)) continue;
+                DrawCommandRow(kv.Key, info);
+            }
+            EditorGUILayout.EndScrollView();
+            EditorGUILayout.EndVertical();
+
+            EditorGUILayout.EndVertical();
+        }
+
+        private void DrawCategoryChip(string category, float width)
+        {
+            bool active = _cmdCategoryFilter == category;
+            string displayCategory = category == "All" ? AgentLocalization.Get("category_all", "全部") : category;
+            if (GUILayout.Button(displayCategory, active ? ModernUI.FilterActive : ModernUI.FilterNormal, GUILayout.Width(width), GUILayout.Height(24)))
+            {
+                _cmdCategoryFilter = category;
+            }
+        }
+
+        private void DrawCommandRow(string key, AgentCommandInfo info)
+        {
+            bool selected = _selectedCmdKey == key;
+            string category = NormalizeCategory(info.Category);
+
+            EditorGUILayout.BeginVertical(selected ? ModernUI.CommandRowSelected : ModernUI.CommandRow, GUILayout.MinHeight(34));
+            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
+
+            if (GUILayout.Button(info.MethodName, ModernUI.CommandNameButton, GUILayout.ExpandWidth(true), GUILayout.Height(24)))
+            {
+                _selectedCmdKey = selected ? null : key;
+                _cmdArgs = info.ParameterNames ?? new string[0];
+                _cmdArgValues = new string[_cmdArgs.Length];
+            }
+
+            GUILayout.Label(category, ModernUI.CommandTag, GUILayout.Width(58), GUILayout.Height(20));
+
+            if (GUILayout.Button("▶", ModernUI.SmallRunButton, GUILayout.Width(32), GUILayout.Height(22)))
+            {
+                string[] args = info.ParameterNames ?? new string[0];
+                if (args.Length > 0 && !selected)
+                {
+                    _selectedCmdKey = key;
+                    _cmdArgs = args;
+                    _cmdArgValues = new string[_cmdArgs.Length];
+                }
+                else
+                {
+                    ExecuteCommand(info, selected ? _cmdArgValues : new string[0]);
+                }
+            }
+            EditorGUILayout.EndHorizontal();
+
+            if (selected)
+            {
+                GUILayout.Label(info.ClassName, ModernUI.CommandClass);
+                if (!string.IsNullOrEmpty(info.Description))
+                {
+                    GUILayout.Label(info.Description, ModernUI.CommandDescription);
+                }
+
+                for (int i = 0; i < _cmdArgs.Length; i++)
+                {
+                    string label = _cmdArgs[i] + " (" + info.ParameterTypes[i] + ")";
+                    _cmdArgValues[i] = DrawTextRow(label, _cmdArgValues[i] ?? "");
+                }
+
+                EditorGUILayout.BeginHorizontal();
+                GUILayout.FlexibleSpace();
+                if (GUILayout.Button(AgentLocalization.Get("btn_manual_exec", "手动执行"), ModernUI.PrimaryButton, GUILayout.Width(92), GUILayout.Height(26)))
+                {
+                    ExecuteCommand(info, _cmdArgValues);
+                }
+                EditorGUILayout.EndHorizontal();
+            }
+            EditorGUILayout.EndVertical();
+            GUILayout.Space(4);
+        }
+
+        private string NormalizeCategory(string category)
+        {
+            if (string.IsNullOrEmpty(category)) return "Utility";
+            if (category.IndexOf("scene", StringComparison.OrdinalIgnoreCase) >= 0) return "Scene";
+            if (category.IndexOf("json", StringComparison.OrdinalIgnoreCase) >= 0) return "Json";
+            return category;
+        }
+
+        private static class ModernUI
+        {
+            public static Color Bg;
+            public static Color Top;
+            public static Color Panel;
+            public static Color PanelLight;
+            public static Color Input;
+            public static Color Blue;
+            public static Color Green;
+            public static Color GreenText;
+            public static Color Orange;
+            public static Color OrangeText;
+            public static Color Red;
+            public static Color RedText;
+            public static Color Text;
+            public static Color Muted;
+
+            public static GUIStyle PagePadding;
+            public static GUIStyle TopBar;
+            public static GUIStyle WindowTitle;
+            public static GUIStyle WindowSubtitle;
+            public static GUIStyle ToolbarLabel;
+            public static GUIStyle ToolbarToggle;
+            public static GUIStyle AgentBadge;
+            public static GUIStyle TabNormal;
+            public static GUIStyle TabActive;
+            public static GUIStyle Card;
+            public static GUIStyle CardTitle;
+            public static GUIStyle CardSubtitle;
+            public static GUIStyle SectionTitle;
+            public static GUIStyle FieldLabel;
+            public static GUIStyle TextField;
+            public static GUIStyle Popup;
+            public static GUIStyle TextArea;
+            public static GUIStyle MiniValue;
+            public static GUIStyle NumberBadge;
+            public static GUIStyle StatusOnline;
+            public static GUIStyle StatusRunning;
+            public static GUIStyle PrimaryButton;
+            public static GUIStyle SecondaryButton;
+            public static GUIStyle DangerButton;
+            public static GUIStyle IconButton;
+            public static GUIStyle Toggle;
+            public static GUIStyle ChatViewport;
+            public static GUIStyle EmptyHint;
+            public static GUIStyle MsgSystem;
+            public static GUIStyle MsgUser;
+            public static GUIStyle MsgAI;
+            public static GUIStyle MessageMeta;
+            public static GUIStyle MessageText;
+            public static GUIStyle CopyButton;
+            public static GUIStyle Composer;
+            public static GUIStyle InputArea;
+            public static GUIStyle SearchField;
+            public static GUIStyle FilterActive;
+            public static GUIStyle FilterNormal;
+            public static GUIStyle CommandViewport;
+            public static GUIStyle CommandRow;
+            public static GUIStyle CommandRowSelected;
+            public static GUIStyle CommandNameButton;
+            public static GUIStyle CommandTag;
+            public static GUIStyle CommandClass;
+            public static GUIStyle CommandDescription;
+            public static GUIStyle SmallRunButton;
+
+            // Code block styles
+            public static GUIStyle CodeBlockBg;
+            public static GUIStyle CodeBlockText;
+            public static GUIStyle CodeBlockHeader;
+
+            private static bool _ready;
+            private static bool _isProSkinCached;
+
+            public static void Ensure()
+            {
+                bool isPro = EditorGUIUtility.isProSkin;
+                if (_ready && _isProSkinCached == isPro) return;
+                _ready = true;
+                _isProSkinCached = isPro;
+
+                if (isPro)
+                {
+                    Bg = new Color(0.075f, 0.082f, 0.095f);
+                    Top = new Color(0.105f, 0.115f, 0.135f);
+                    Panel = new Color(0.13f, 0.145f, 0.17f);
+                    PanelLight = new Color(0.165f, 0.185f, 0.22f);
+                    Input = new Color(0.085f, 0.098f, 0.118f);
+                    Blue = new Color(0.20f, 0.43f, 0.88f);
+                    Green = new Color(0.08f, 0.28f, 0.18f);
+                    GreenText = new Color(0.40f, 0.95f, 0.65f);
+                    Orange = new Color(0.36f, 0.25f, 0.10f);
+                    OrangeText = new Color(1.0f, 0.78f, 0.35f);
+                    Red = new Color(0.34f, 0.13f, 0.15f);
+                    RedText = new Color(1.0f, 0.78f, 0.78f);
+                    Text = new Color(0.86f, 0.88f, 0.93f);
+                    Muted = new Color(0.55f, 0.60f, 0.69f);
+                }
+                else
+                {
+                    Bg = new Color(0.94f, 0.94f, 0.94f);
+                    Top = new Color(0.88f, 0.88f, 0.88f);
+                    Panel = new Color(0.98f, 0.98f, 0.98f);
+                    PanelLight = new Color(0.85f, 0.87f, 0.90f);
+                    Input = new Color(1.0f, 1.0f, 1.0f);
+                    Blue = new Color(0.12f, 0.38f, 0.84f);
+                    Green = new Color(0.80f, 0.94f, 0.85f);
+                    GreenText = new Color(0.08f, 0.40f, 0.20f);
+                    Orange = new Color(0.98f, 0.90f, 0.70f);
+                    OrangeText = new Color(0.60f, 0.35f, 0.05f);
+                    Red = new Color(0.95f, 0.82f, 0.84f);
+                    RedText = new Color(0.60f, 0.10f, 0.15f);
+                    Text = new Color(0.12f, 0.14f, 0.18f);
+                    Muted = new Color(0.40f, 0.44f, 0.50f);
+                }
+
+                PagePadding = new GUIStyle { padding = new RectOffset(12, 12, 12, 12) };
+                TopBar = Box(Top, new RectOffset(16, 16, 8, 8));
+                WindowTitle = Label(18, isPro ? Color.white : Text, FontStyle.Bold);
+                WindowSubtitle = Label(12, Muted, FontStyle.Normal);
+                ToolbarLabel = Label(12, Muted, FontStyle.Normal);
+                ToolbarToggle = Button(PanelLight, Text, FontStyle.Normal);
+                AgentBadge = Chip(isPro ? new Color(0.13f, 0.22f, 0.36f) : new Color(0.80f, 0.88f, 1.0f), isPro ? new Color(0.76f, 0.86f, 1.0f) : new Color(0.05f, 0.25f, 0.55f), FontStyle.Bold);
+                TabNormal = Button(isPro ? new Color(0.125f, 0.14f, 0.165f) : new Color(0.85f, 0.85f, 0.85f), Muted, FontStyle.Normal);
+                TabActive = Button(isPro ? new Color(0.16f, 0.26f, 0.46f) : new Color(0.16f, 0.36f, 0.66f), Color.white, FontStyle.Bold);
+                Card = Box(Panel, new RectOffset(14, 14, 12, 12));
+                CardTitle = Label(15, isPro ? Color.white : Text, FontStyle.Bold);
+                CardSubtitle = Label(12, Muted, FontStyle.Normal);
+                SectionTitle = Label(12, Text, FontStyle.Bold);
+                FieldLabel = Label(12, Text, FontStyle.Normal);
+                TextField = TextInput(24);
+                Popup = new GUIStyle(EditorStyles.popup)
+                {
+                    fontSize = 12,
+                    normal = { background = Tex(Input), textColor = Text },
+                    focused = { background = Tex(isPro ? new Color(0.10f, 0.12f, 0.15f) : new Color(0.90f, 0.92f, 0.95f)), textColor = isPro ? Color.white : Text },
+                    padding = new RectOffset(8, 8, 3, 3)
+                };
+                TextArea = new GUIStyle(EditorStyles.textArea)
+                {
+                    wordWrap = true,
+                    fontSize = 12,
+                    normal = { background = Tex(Input), textColor = Text },
+                    focused = { background = Tex(isPro ? new Color(0.10f, 0.12f, 0.15f) : new Color(0.90f, 0.92f, 0.95f)), textColor = isPro ? Color.white : Text },
+                    padding = new RectOffset(8, 8, 7, 7)
+                };
+                MiniValue = Label(11, Muted, FontStyle.Normal);
+                NumberBadge = Label(12, Text, FontStyle.Bold);
+                NumberBadge.alignment = TextAnchor.MiddleCenter;
+                NumberBadge.normal.background = Tex(Input);
+
+                StatusOnline = Chip(Green, GreenText, FontStyle.Bold);
+                StatusRunning = Chip(Orange, OrangeText, FontStyle.Bold);
+                PrimaryButton = Button(Blue, Color.white, FontStyle.Bold);
+                SecondaryButton = Button(PanelLight, Text, FontStyle.Normal);
+                DangerButton = Button(isPro ? Red : new Color(0.95f, 0.80f, 0.80f), isPro ? RedText : new Color(0.60f, 0.10f, 0.15f), FontStyle.Bold);
+                IconButton = Button(PanelLight, Text, FontStyle.Bold);
+                Toggle = new GUIStyle(EditorStyles.toggle)
+                {
+                    fontSize = 12,
+                    normal = { textColor = Text },
+                    hover = { textColor = isPro ? Color.white : Text },
+                    focused = { textColor = isPro ? Color.white : Text },
+                    active = { textColor = isPro ? Color.white : Text }
+                };
+
+                ChatViewport = Box(isPro ? new Color(0.082f, 0.095f, 0.115f) : new Color(0.90f, 0.90f, 0.90f), new RectOffset(10, 10, 10, 10));
+                EmptyHint = Label(13, Muted, FontStyle.Normal);
+                EmptyHint.alignment = TextAnchor.MiddleCenter;
+                MsgSystem = Box(isPro ? new Color(0.10f, 0.20f, 0.15f) : new Color(0.80f, 0.92f, 0.85f), new RectOffset(10, 10, 8, 8));
+                MsgUser = Box(isPro ? new Color(0.105f, 0.16f, 0.25f) : new Color(0.85f, 0.90f, 0.96f), new RectOffset(10, 10, 8, 8));
+                MsgAI = Box(isPro ? new Color(0.16f, 0.125f, 0.225f) : new Color(0.92f, 0.88f, 0.95f), new RectOffset(10, 10, 8, 8));
+                MessageMeta = Label(11, Muted, FontStyle.Bold);
+                MessageText = new GUIStyle(EditorStyles.wordWrappedLabel)
+                {
+                    richText = true,
+                    wordWrap = true,
+                    fontSize = 12,
+                    normal = { textColor = Text }
+                };
+                CopyButton = Button(PanelLight, Text, FontStyle.Normal);
+                Composer = Box(isPro ? new Color(0.105f, 0.12f, 0.145f) : new Color(0.88f, 0.88f, 0.88f), new RectOffset(8, 8, 7, 7));
+                InputArea = new GUIStyle(TextArea) { fontSize = 13 };
+
+                SearchField = TextInput(28);
+                FilterActive = Chip(Blue, Color.white, FontStyle.Bold);
+                FilterNormal = Chip(PanelLight, Text, FontStyle.Normal);
+                CommandViewport = Box(isPro ? new Color(0.082f, 0.095f, 0.115f) : new Color(0.90f, 0.90f, 0.90f), new RectOffset(6, 6, 6, 6));
+                CommandRow = Box(isPro ? new Color(0.135f, 0.155f, 0.185f) : new Color(0.95f, 0.95f, 0.95f), new RectOffset(6, 6, 5, 5));
+                CommandRowSelected = Box(isPro ? new Color(0.155f, 0.19f, 0.25f) : new Color(0.80f, 0.88f, 0.96f), new RectOffset(6, 6, 5, 7));
+                CommandNameButton = new GUIStyle(EditorStyles.label)
+                {
+                    fontSize = 12,
+                    alignment = TextAnchor.MiddleLeft,
+                    normal = { textColor = Text }
+                };
+                CommandTag = Chip(isPro ? new Color(0.16f, 0.25f, 0.42f) : new Color(0.80f, 0.88f, 1.0f), isPro ? new Color(0.64f, 0.78f, 1.0f) : new Color(0.05f, 0.25f, 0.55f), FontStyle.Bold);
+                CommandClass = Label(10, Muted, FontStyle.Normal);
+                CommandDescription = Label(11, Muted, FontStyle.Normal);
+                CommandDescription.wordWrap = true;
+                SmallRunButton = Button(isPro ? new Color(0.18f, 0.24f, 0.33f) : new Color(0.80f, 0.88f, 1.0f), isPro ? new Color(0.82f, 0.90f, 1f) : new Color(0.05f, 0.25f, 0.55f), FontStyle.Bold);
+
+                // Code block style initialization
+                CodeBlockBg = Box(isPro ? new Color(0.05f, 0.06f, 0.07f) : new Color(0.92f, 0.92f, 0.92f), new RectOffset(10, 10, 8, 8));
+                CodeBlockText = new GUIStyle(EditorStyles.label)
+                {
+                    font = Font.CreateDynamicFontFromOSFont(new string[] { "Consolas", "Courier New", "Courier", "Monospace" }, 12),
+                    richText = false,
+                    wordWrap = true,
+                    normal = { textColor = isPro ? new Color(0.85f, 0.90f, 0.75f) : new Color(0.15f, 0.35f, 0.15f) }
+                };
+                CodeBlockHeader = Label(11, Muted, FontStyle.Bold);
+            }
+
+            private static GUIStyle TextInput(int height)
+            {
+                return new GUIStyle(EditorStyles.textField)
+                {
+                    fixedHeight = height,
+                    fontSize = 12,
+                    normal = { background = Tex(Input), textColor = Text },
+                    focused = { background = Tex(_isProSkinCached ? new Color(0.105f, 0.125f, 0.16f) : new Color(0.95f, 0.97f, 1f)), textColor = Text },
+                    padding = new RectOffset(8, 8, 4, 4)
+                };
+            }
+
+            private static GUIStyle Box(Color color, RectOffset padding)
+            {
+                return new GUIStyle
+                {
+                    padding = padding,
+                    margin = new RectOffset(0, 0, 0, 0),
+                    normal = { background = Tex(color) }
+                };
+            }
+
+            private static GUIStyle Label(int size, Color color, FontStyle style)
+            {
+                return new GUIStyle(EditorStyles.label)
+                {
+                    fontSize = size,
+                    fontStyle = style,
+                    normal = { textColor = color }
+                };
+            }
+
+            private static GUIStyle Button(Color bg, Color color, FontStyle style)
+            {
+                Color hover = new Color(Mathf.Min(bg.r + 0.05f, 1f), Mathf.Min(bg.g + 0.05f, 1f), Mathf.Min(bg.b + 0.05f, 1f), bg.a);
+                Color active = new Color(Mathf.Max(bg.r - 0.04f, 0f), Mathf.Max(bg.g - 0.04f, 0f), Mathf.Max(bg.b - 0.04f, 0f), bg.a);
+                return new GUIStyle(GUI.skin.button)
+                {
+                    alignment = TextAnchor.MiddleCenter,
+                    fontSize = 12,
+                    fontStyle = style,
+                    normal = { background = Tex(bg), textColor = color },
+                    hover = { background = Tex(hover), textColor = color },
+                    active = { background = Tex(active), textColor = color },
+                    padding = new RectOffset(8, 8, 3, 3)
+                };
+            }
+
+            private static GUIStyle Chip(Color bg, Color color, FontStyle style)
+            {
+                GUIStyle s = Button(bg, color, style);
+                s.fontSize = 11;
+                return s;
+            }
+
+            private static Texture2D Tex(Color color)
+            {
+                Texture2D tex = new Texture2D(1, 1);
+                tex.hideFlags = HideFlags.HideAndDontSave;
+                tex.SetPixel(0, 0, color);
+                tex.Apply();
+                return tex;
+            }
+        }
+
+
+        private bool CommandMatchesSearch(AgentCommandInfo info)
+        {
+            string category = NormalizeCategory(info.Category);
+            if (!string.IsNullOrEmpty(_cmdCategoryFilter) && _cmdCategoryFilter != "All")
+            {
+                if (!string.Equals(category, _cmdCategoryFilter, StringComparison.OrdinalIgnoreCase)) return false;
+            }
+
+            if (string.IsNullOrEmpty(_cmdSearchText)) return true;
+            string q = _cmdSearchText.Trim();
+            if (string.IsNullOrEmpty(q)) return true;
+
+            if (!string.IsNullOrEmpty(info.MethodName) && info.MethodName.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (!string.IsNullOrEmpty(info.ClassName) && info.ClassName.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (!string.IsNullOrEmpty(info.Description) && info.Description.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            if (!string.IsNullOrEmpty(info.Category) && info.Category.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            return false;
+        }
+
+
+        private void SendUserMessage(string text)
+        {
+            AddMessage("user", text);
+            SaveHistory();
+
+            // 先确认 Unity 执行端在线。若 AgentBridge 没有启动，继续请求 LLM 只会卡在 query_scene。
+            if (!AgentBridge.EnsureServerRunning())
+            {
+                AddMessage("assistant", AgentLocalization.Get("err_bridge_not_running"));
+                SaveHistory();
+                return;
+            }
+
+            if (!EnsurePythonAgentService())
+            {
+                AddMessage("assistant", AgentLocalization.Get("err_service_not_running"));
+                SaveHistory();
+                return;
+            }
+
+            // 防止上一次卡在 Unity 离线重试中的 Python 会话继续占用日志与请求。
+            try { PythonAgentClient.PostJson(ServiceUrl + "/sessions/cancel_all", AgentJson.NewObject(), 2000); } catch { }
+
+            JsonData config = BuildSessionConfig(text);
+            try
+            {
+                string resp = PythonAgentClient.PostJson(ServiceUrl + "/sessions/start", config, 10000);
+                JsonData data = AgentJson.ParseObject(resp);
+                if (AgentJson.HasKey(data, "Success") && data["Success"].ToString().ToLower() == "true")
+                {
+                    _activeSessionId = AgentJson.GetString(data, "SessionId");
+                    _lastEventId = 0;
+                    _agentStepCount = 0;
+                    _agentStepStatus = null;
+                    _isWaiting = true;
+                    _nextEventPollTime = 0;
+                    _consecutivePollFailures = 0;
+                    EditorPrefs.SetString("AIAss_ActiveSessionId", _activeSessionId);
+                    EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
+                    AddMessage("system", AgentLocalization.GetFormat("msg_session_started", _activeSessionId));
+                }
+                else
+                {
+                    AddMessage("assistant", AgentLocalization.GetFormat("err_session_start_failed", resp));
+                }
+            }
+            catch (Exception ex)
+            {
+                AddMessage("assistant", AgentLocalization.GetFormat("err_session_start_exception", ex.Message));
+                _isWaiting = false;
+            }
+            SaveHistory();
+            Repaint();
+        }
+
+        private JsonData BuildSessionConfig(string userMessage)
+        {
+            JsonData data = AgentJson.NewObject();
+            data["project_path"] = ProjectPath;
+            data["user_message"] = userMessage;
+            data["unity_version"] = Application.unityVersion;
+            data["api_url"] = GetCurrentApiUrl();
+            data["api_key"] = _mode == LLMMode.Ollama ? "" : _apiKey;
+            data["model"] = _mode == LLMMode.Ollama ? _ollamaModel : _modelName;
+            data["mode"] = _mode == LLMMode.Ollama ? "ollama" : "remote_api";
+            data["provider"] = _mode == LLMMode.Ollama ? "openai-compatible" : ProviderNames[(int)_provider];
+            data["user_system_prompt"] = _userSystemPrompt ?? "";
+            data["max_steps"] = _maxSteps;
+            data["cancel_existing"] = true;
+            data["unity_startup_timeout"] = 30;
+            data["unity_reconnect_timeout"] = 15;
+            data["unity_tool_timeout"] = 15;
+            data["unity_tool_retries"] = 5;
+            data["language"] = AgentLocalization.CurrentLanguage;
+            return data;
+        }
+
+        private string GetCurrentApiUrl()
+        {
+            if (_mode == LLMMode.Ollama) return _ollamaUrl.TrimEnd('/') + "/v1/chat/completions";
+            if (_provider == APIProvider.Claude) return _baseUrl.TrimEnd('/');
+            return _baseUrl.TrimEnd('/') + "/chat/completions";
+        }
+
+        private bool EnsurePythonAgentService()
+        {
+            if (PythonAgentClient.IsHealthy(ServiceUrl)) return true;
+
+            string script = Path.Combine(AgentControllerDir, "run_agent_service.py");
+            if (!File.Exists(script))
+            {
+                Debug.LogError("[AIAssistantWindow] run_agent_service.py not found: " + script);
+                return false;
+            }
+
+            try
+            {
+                string pythonCmd = EditorPrefs.GetString("AIBridge_PythonCmd", "python");
+                var psi = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = pythonCmd,
+                    Arguments = "\"" + script + "\" --project-path \"" + ProjectPath + "\" --port " + PythonAgentClient.GetServicePort(ProjectPath),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    WorkingDirectory = AgentControllerDir
+                };
+                _pythonServiceProcess = new System.Diagnostics.Process();
+                _pythonServiceProcess.StartInfo = psi;
+                _pythonServiceProcess.OutputDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.Log("[Python Agent Service] " + e.Data); };
+                _pythonServiceProcess.ErrorDataReceived += (sender, e) => { if (!string.IsNullOrEmpty(e.Data)) Debug.LogError("[Python Agent Service Error] " + e.Data); };
+                _pythonServiceProcess.Start();
+                _pythonServiceProcess.BeginOutputReadLine();
+                _pythonServiceProcess.BeginErrorReadLine();
+                EditorPrefs.SetInt("AIAss_ServicePid", _pythonServiceProcess.Id);
+            }
+            catch (Exception ex)
+            {
+                Debug.LogError("[AIAssistantWindow] Failed to start Python Agent Service: " + ex.Message);
+                return false;
+            }
+
+            double start = EditorApplication.timeSinceStartup;
+            while (EditorApplication.timeSinceStartup - start < 8.0)
+            {
+                if (PythonAgentClient.IsHealthy(ServiceUrl)) return true;
+                System.Threading.Thread.Sleep(250);
+            }
+            return PythonAgentClient.IsHealthy(ServiceUrl);
+        }
+
+        private void PollPythonAgentSession()
+        {
+            try
+            {
+                string url = ServiceUrl + "/sessions/" + _activeSessionId + "/events?after=" + _lastEventId;
+                string json = PythonAgentClient.Get(url, 1000);
+                JsonData data = AgentJson.ParseObject(json);
+                if (AgentJson.HasKey(data, "Events") && data["Events"].IsArray)
+                {
+                    JsonData events = data["Events"];
+                    for (int i = 0; i < events.Count; i++)
+                    {
+                        JsonData ev = events[i];
+                        if (AgentJson.HasKey(ev, "id")) int.TryParse(ev["id"].ToString(), out _lastEventId);
+                        HandleAgentEvent(ev);
+                    }
+                    EditorPrefs.SetInt("AIAss_LastEventId", _lastEventId);
+                }
+
+                if (File.Exists(HistoryPath))
+                {
+                    DateTime write = File.GetLastWriteTime(HistoryPath);
+                    if (write > _lastHistoryLoad)
+                    {
+                        LoadHistory();
+                        _lastHistoryLoad = write;
+                    }
+                }
+
+                bool finished = AgentJson.HasKey(data, "Finished") && data["Finished"].ToString().ToLower() == "true";
+                _consecutivePollFailures = 0;
+
+                if (finished)
+                {
+                    _isWaiting = false;
+                    _activeSessionId = null;
+                    _agentStepStatus = null;
+                    _agentStepCount = 0;
+                    EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
+                    EditorPrefs.DeleteKey("AIAss_LastEventId");
+                    LoadHistory();
+                }
+                Repaint();
+            }
+            catch
+            {
+                // Python Service 可能正在启动或短暂繁忙，下一次节流轮询继续。
+                _consecutivePollFailures++;
+                if (_consecutivePollFailures > 30)
+                {
+                    AddMessage("assistant", AgentLocalization.Get("err_poll_timeout"));
+                    _isWaiting = false;
+                    _activeSessionId = null;
+                    EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
+                    EditorPrefs.DeleteKey("AIAss_LastEventId");
+                    SaveHistory();
+                }
+            }
+        }
+
+        private void HandleAgentEvent(JsonData ev)
+        {
+            string type = AgentJson.GetString(ev, "type");
+            string message = AgentJson.GetString(ev, "message");
+            if (type == "llm_request_started")
+            {
+                _agentStepCount++;
+                _agentStepStatus = "[Step " + _agentStepCount + "] " + AgentLocalization.Get("step_request_llm", "请求 LLM");
+            }
+            else if (type == "tool_call_started")
+            {
+                _agentStepStatus = message;
+            }
+            else if (type == "compile_polling" || type == "compile_started")
+            {
+                _agentStepStatus = message;
+            }
+        }
+
+        private void StopPendingSession()
+        {
+            if (!string.IsNullOrEmpty(_activeSessionId))
+            {
+                try { PythonAgentClient.PostJson(ServiceUrl + "/sessions/" + _activeSessionId + "/cancel", AgentJson.NewObject(), 3000); }
+                catch { }
+            }
+            _isWaiting = false;
+            _activeSessionId = null;
+            _agentStepStatus = null;
+            _agentStepCount = 0;
+            EditorPrefs.DeleteKey("AIAss_ActiveSessionId");
+            EditorPrefs.DeleteKey("AIAss_LastEventId");
+            AddMessage("system", AgentLocalization.Get("msg_session_terminated"));
+            SaveHistory();
+            Repaint();
+        }
+
+        private void ExecuteCommand(AgentCommandInfo info, string[] argValues)
+        {
+            JsonData payload = AgentJson.NewObject();
+            payload["ClassName"] = info.ClassName;
+            payload["MethodName"] = info.MethodName;
+            payload["Args"] = AgentJson.StringArray(argValues ?? new string[0]);
+            string result = AgentBridge.ExecuteCommandJson(JsonMapper.ToJson(payload));
+            AddMessage("system", AgentLocalization.GetFormat("msg_manual_exec_result", info.MethodName, result));
+            SaveHistory();
+            Repaint();
+        }
+
+        private void AddMessage(string role, string content, string reasoning = "")
+        {
+            _messages.Add(new ChatMessage
+            {
+                role = role,
+                content = content ?? "",
+                reasoning_content = reasoning ?? "",
+                time = DateTime.Now.ToString("HH:mm:ss")
+            });
+        }
+
+        private void SaveHistory()
+        {
+            try
+            {
+                JsonData root = AgentJson.NewObject();
+                JsonData arr = AgentJson.NewArray();
+                for (int i = 0; i < _messages.Count; i++)
+                {
+                    ChatMessage m = _messages[i];
+                    JsonData item = AgentJson.NewObject();
+                    item["role"] = m.role ?? "";
+                    item["content"] = m.content ?? "";
+                    item["reasoning_content"] = m.reasoning_content ?? "";
+                    item["time"] = m.time ?? "";
+                    arr.Add(item);
+                }
+                root["messages"] = arr;
+                if (!Directory.Exists(AgentControllerDir)) Directory.CreateDirectory(AgentControllerDir);
+                WriteTextSharedWithRetry(HistoryPath, JsonMapper.ToJson(root));
+            }
+            catch (Exception e) { Debug.LogWarning("[AIAssistant] 保存历史失败: " + e.Message); }
+        }
+
+        private void LoadHistory()
+        {
+            try
+            {
+                if (!File.Exists(HistoryPath)) return;
+                string json = ReadTextSharedWithRetry(HistoryPath);
+                JsonData root = AgentJson.ParseObject(json);
+                List<ChatMessage> list = new List<ChatMessage>();
+                if (AgentJson.HasKey(root, "messages") && root["messages"].IsArray)
+                {
+                    JsonData arr = root["messages"];
+                    for (int i = 0; i < arr.Count; i++)
+                    {
+                        JsonData item = arr[i];
+                        list.Add(new ChatMessage
+                        {
+                            role = AgentJson.GetString(item, "role"),
+                            content = AgentJson.GetString(item, "content"),
+                            reasoning_content = AgentJson.GetString(item, "reasoning_content"),
+                            time = AgentJson.GetString(item, "time")
+                        });
+                    }
+                }
+                _messages = list;
+            }
+            catch (Exception e) { Debug.LogWarning("[AIAssistant] 加载历史失败: " + e.Message); }
+        }
+
+        private static void WriteTextSharedWithRetry(string path, string text)
+        {
+            Exception last = null;
+            for (int i = 0; i < 20; i++)
+            {
+                try
+                {
+                    string dir = Path.GetDirectoryName(path);
+                    if (!string.IsNullOrEmpty(dir) && !Directory.Exists(dir)) Directory.CreateDirectory(dir);
+                    byte[] bytes = Encoding.UTF8.GetBytes(text ?? "");
+                    using (FileStream fs = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.ReadWrite))
+                    {
+                        fs.Write(bytes, 0, bytes.Length);
+                        fs.Flush(true);
+                    }
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    System.Threading.Thread.Sleep(30 * (i + 1));
+                }
+            }
+            throw last ?? new IOException("写入失败: " + path);
+        }
+
+        private static string ReadTextSharedWithRetry(string path)
+        {
+            Exception last = null;
+            for (int i = 0; i < 20; i++)
+            {
+                try
+                {
+                    using (FileStream fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                    using (StreamReader reader = new StreamReader(fs, Encoding.UTF8, true))
+                    {
+                        return reader.ReadToEnd();
+                    }
+                }
+                catch (Exception ex)
+                {
+                    last = ex;
+                    System.Threading.Thread.Sleep(30 * (i + 1));
+                }
+            }
+            throw last ?? new IOException("读取失败: " + path);
+        }
+
+        private void SavePrefs()
+        {
+            AIBridgeSettings settings = AIBridgeSettings.GetOrCreateSettings();
+            settings.Mode = (int)_mode;
+            settings.Provider = (int)_provider;
+            settings.BaseUrl = _baseUrl ?? "";
+            settings.ModelName = _modelName ?? "";
+            settings.OllamaUrl = _ollamaUrl ?? "";
+            settings.OllamaModel = _ollamaModel ?? "";
+            settings.UserSystemPrompt = _userSystemPrompt ?? "";
+            settings.MaxSteps = _maxSteps;
+            settings.ShowReasoning = _showReasoning;
+
+            // API key is stored securely using AES encryption in EditorPrefs
+            EditorPrefs.SetString("AIAss_Api_Key", AgentEncryptionUtility.Encrypt(_apiKey));
+        }
+
+        private void LoadPrefs()
+        {
+            AIBridgeSettings settings = AIBridgeSettings.GetOrCreateSettings();
+            _mode = (LLMMode)settings.Mode;
+            _provider = (APIProvider)settings.Provider;
+            _baseUrl = settings.BaseUrl;
+            _modelName = settings.ModelName;
+            _ollamaUrl = settings.OllamaUrl;
+            _ollamaModel = settings.OllamaModel;
+            _userSystemPrompt = settings.UserSystemPrompt;
+            _maxSteps = settings.MaxSteps;
+            _showReasoning = settings.ShowReasoning;
+
+            _apiKey = AgentEncryptionUtility.Decrypt(EditorPrefs.GetString("AIAss_Api_Key", ""));
+        }
+    }
+}

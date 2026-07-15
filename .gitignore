@@ -1,0 +1,44 @@
+# Unity generated folders
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Bb]uild/
+/[Bb]uilds/
+/MemoryCaptures/
+/Recordings/
+
+# Unity generated IDE files
+*.csproj
+*.sln
+*.suo
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+/.vs/
+/.vscode/
+
+# Python caches and local environments (legacy baseline only)
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+venv/
+
+# AIBridge local runtime state and personal chat data
+/AgentController/agent_port.txt
+/AgentController/ai_chat_history.json
+/AgentController/ai_agent_events.json
+/Library/AIBridge/
+
+# OS files
+.DS_Store
+Thumbs.db
+Desktop.ini

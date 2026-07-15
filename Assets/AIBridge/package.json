@@ -1,0 +1,11 @@
+{
+  "name": "com.LegendMars.aibridge",
+  "version": "1.0.0",
+  "displayName": "AI Bridge",
+  "description": "Unity Editor AI Agent bridge framework. Connects local LLM and cloud LLM to run agents and execute C# commands in the editor.",
+  "unity": "2018.4.36f1",
+  "author": {
+    "name": "LegendMars"
+  },
+  "dependencies": {}
+}
