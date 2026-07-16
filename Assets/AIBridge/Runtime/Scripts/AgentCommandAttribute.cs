@@ -8,7 +8,7 @@ namespace AIBridge.Agent
     /// <summary>
     /// 标记一个静态方法为可供 AI 代理直接调用的命令。
     /// 带有此特性的方法会在 AgentBridge 启动时自动注册到命令注册表中，
-    /// 无需手动修改 AgentBridge.cs 或 unity_agent_controller.py。
+    /// 无需手动修改 AgentBridge.cs 或工具路由器。
     /// 用法示例：
     ///   [AgentCommand("在指定位置创建一个 Cube", category: "Scene")]
     ///   public static string CreateCube(float x, float y, float z) { ... }
@@ -113,15 +113,13 @@ namespace AIBridge.Agent
         public static void Scan()
         {
             var result = new Dictionary<string, AgentCommandInfo>();
+            Assembly attributeAssembly = typeof(AgentCommandAttribute).Assembly;
+            string attributeAssemblyName = attributeAssembly.GetName().Name;
 
             foreach (Assembly asm in AppDomain.CurrentDomain.GetAssemblies())
             {
-                string asmName = asm.FullName;
-                // 跳过已知的系统程序集和大型 Unity 核心程序集，减少扫描开销
-                if (asmName.StartsWith("System") || asmName.StartsWith("mscorlib") ||
-                    asmName.StartsWith("UnityEngine") || asmName.StartsWith("UnityEditor.") ||
-                    asmName.StartsWith("Mono.") || asmName.StartsWith("Microsoft."))
-                    continue;
+                if (!CanContainAgentCommands(asm, attributeAssembly, attributeAssemblyName)) continue;
+                string asmName = asm.FullName ?? asm.GetName().Name;
 
                 try
                 {
@@ -200,24 +198,32 @@ namespace AIBridge.Agent
                 _initialized = true;
             }
 
+#if AIBRIDGE_VERBOSE_LOGS
             BridgeLog.Log($"[AgentCommandRegistry] 扫描完成，共找到 {sortedResult.Count} 个 AgentCommand 方法。");
+#endif
         }
 
-        /// <summary>
-        /// 使注册表失效，下次访问 Commands 时重新扫描。
-        /// 在程序集重载后调用此方法以刷新命令列表。
-        /// </summary>
-        public static void Invalidate()
+        private static bool CanContainAgentCommands(
+            Assembly assembly,
+            Assembly attributeAssembly,
+            string attributeAssemblyName)
         {
-            lock (_lock)
+            if (assembly == attributeAssembly) return true;
+            try
             {
-                _initialized = false;
-                _commands = null;
+                AssemblyName[] references = assembly.GetReferencedAssemblies();
+                for (int i = 0; i < references.Length; i++)
+                {
+                    if (string.Equals(references[i].Name, attributeAssemblyName, StringComparison.Ordinal))
+                        return true;
+                }
             }
+            catch { }
+            return false;
         }
 
         /// <summary>
-        /// 将整个命令注册表序列化为 JSON 字符串，用于 /agent/commands HTTP 端点响应。
+        /// 将整个命令注册表序列化为 JSON 字符串，供 list_commands 工具响应。
         /// </summary>
         public static string ToJson()
         {

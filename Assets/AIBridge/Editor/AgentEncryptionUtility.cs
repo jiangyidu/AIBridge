@@ -7,12 +7,12 @@ using UnityEngine;
 namespace AIBridge.Agent
 {
     /// <summary>
-    /// Utility class for encrypting and decrypting API keys stored in EditorPrefs.
-    /// Uses AES-256 with a key derived from the machine's unique identifier (SystemInfo.deviceUniqueIdentifier)
-    /// to prevent keys from being extracted if preference files are copied to another machine.
+    /// API Key 的 EditorPrefs 加密与旧格式迁移。带版本前缀的新格式解密失败时绝不把密文
+    /// 当作明文返回，避免 Domain Reload 后把 Base64/AES 密文误发给模型服务。
     /// </summary>
     public static class AgentEncryptionUtility
     {
+        private const string StoragePrefix = "aibridge:v1:";
         private static readonly byte[] Salt = new byte[]
         {
             0x41, 0x49, 0x42, 0x72, 0x69, 0x64, 0x67, 0x65,
@@ -21,117 +21,183 @@ namespace AIBridge.Agent
 
         public static string Encrypt(string plainText)
         {
+            plainText = NormalizeApiKey(plainText);
             if (string.IsNullOrEmpty(plainText)) return "";
             try
             {
-                string keyStr = SystemInfo.deviceUniqueIdentifier;
-                if (string.IsNullOrEmpty(keyStr) || keyStr == "n/a")
-                {
-                    keyStr = "AIBridgeFallbackEncryptionKeySalt";
-                }
-
-                byte[] keyBytes;
-                using (var deriveBytes = new Rfc2898DeriveBytes(keyStr, Salt, 1000))
-                {
-                    keyBytes = deriveBytes.GetBytes(32); // AES-256
-                }
-
                 using (Aes aes = Aes.Create())
                 {
-                    aes.Key = keyBytes;
+                    aes.Key = DeriveKey();
                     aes.GenerateIV();
-                    byte[] iv = aes.IV;
-
                     using (MemoryStream ms = new MemoryStream())
                     {
-                        ms.Write(iv, 0, iv.Length);
+                        ms.Write(aes.IV, 0, aes.IV.Length);
                         using (CryptoStream cs = new CryptoStream(ms, aes.CreateEncryptor(), CryptoStreamMode.Write))
                         {
                             byte[] plainBytes = Encoding.UTF8.GetBytes(plainText);
                             cs.Write(plainBytes, 0, plainBytes.Length);
                             cs.FlushFinalBlock();
                         }
-                        return Convert.ToBase64String(ms.ToArray());
+                        return StoragePrefix + Convert.ToBase64String(ms.ToArray());
                     }
                 }
             }
             catch (Exception ex)
             {
+                // 加密失败时不再回退为明文持久化。
                 Debug.LogError("[AIBridge] API Key encryption failed: " + ex.Message);
-                return plainText; // Fallback to plain text if exception occurs
+                return "";
             }
         }
 
-        public static string Decrypt(string cipherText)
+        public static string Decrypt(string storedText)
         {
-            if (string.IsNullOrEmpty(cipherText)) return "";
+            string plainText;
+            bool shouldRewrite;
+            if (TryDecrypt(storedText, out plainText, out shouldRewrite))
+                return NormalizeApiKey(plainText);
+            if (!string.IsNullOrEmpty(storedText))
+                Debug.LogWarning("[AIBridge] 已保存的 API Key 无法安全解密，请在配置中重新输入。");
+            return "";
+        }
+
+        /// <summary>
+        /// shouldRewrite 表示读取到了旧版无前缀密文、明文或 Base64 明文，调用方应立即
+        /// 使用当前带版本前缀的格式重新保存。
+        /// </summary>
+        public static bool TryDecrypt(string storedText, out string plainText, out bool shouldRewrite)
+        {
+            plainText = "";
+            shouldRewrite = false;
+            if (string.IsNullOrEmpty(storedText)) return true;
+
+            bool currentFormat = storedText.StartsWith(StoragePrefix, StringComparison.Ordinal);
+            string payload = currentFormat ? storedText.Substring(StoragePrefix.Length) : storedText;
+            byte[] bytes;
             try
             {
-                byte[] cipherBytes;
-                try
+                bytes = Convert.FromBase64String(payload);
+            }
+            catch
+            {
+                if (currentFormat) return false;
+                plainText = storedText; // 旧版可能直接保存了原始 API Key。
+                shouldRewrite = true;
+                return IsPlausiblePlainText(plainText);
+            }
+
+            if (currentFormat)
+                return TryDecryptCipher(bytes, out plainText);
+
+            // 旧版 AES 格式没有版本前缀：IV(16) + 至少一个 AES block。
+            if (bytes.Length >= 32 && (bytes.Length - 16) % 16 == 0)
+            {
+                if (TryDecryptCipher(bytes, out plainText))
                 {
-                    cipherBytes = Convert.FromBase64String(cipherText);
-                }
-                catch
-                {
-                    return cipherText; // Not a base64 string, probably raw key
+                    shouldRewrite = true;
+                    return true;
                 }
 
-                if (cipherBytes.Length < 16)
+                // 仅在解码后确实是可打印文本时兼容早期“Base64(明文)”格式。
+                if (TryDecodePrintableUtf8(bytes, out plainText))
                 {
-                    // Too short to contain IV, probably just a legacy base64 encoded raw key
-                    try
-                    {
-                        return Encoding.UTF8.GetString(cipherBytes);
-                    }
-                    catch
-                    {
-                        return cipherText;
-                    }
+                    shouldRewrite = true;
+                    return true;
                 }
 
-                string keyStr = SystemInfo.deviceUniqueIdentifier;
-                if (string.IsNullOrEmpty(keyStr) || keyStr == "n/a")
-                {
-                    keyStr = "AIBridgeFallbackEncryptionKeySalt";
-                }
+                // 形状像旧 AES 密文但无法解密：必须要求用户重新输入，不能发送密文。
+                plainText = "";
+                return false;
+            }
 
-                byte[] keyBytes;
-                using (var deriveBytes = new Rfc2898DeriveBytes(keyStr, Salt, 1000))
-                {
-                    keyBytes = deriveBytes.GetBytes(32);
-                }
+            if (TryDecodePrintableUtf8(bytes, out plainText))
+            {
+                shouldRewrite = true;
+                return true;
+            }
 
+            // 非旧 AES 形状的 Base64 字符串可能就是服务商签发的原始 Key，保留其文本。
+            plainText = storedText;
+            shouldRewrite = true;
+            return IsPlausiblePlainText(plainText);
+        }
+
+        public static string NormalizeApiKey(string value)
+        {
+            value = (value ?? "").Trim();
+            if (value.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase))
+                value = value.Substring(7).Trim();
+            if (value.Length >= 2 &&
+                ((value[0] == '"' && value[value.Length - 1] == '"') ||
+                 (value[0] == '\'' && value[value.Length - 1] == '\'')))
+                value = value.Substring(1, value.Length - 2).Trim();
+            return value;
+        }
+
+        private static bool TryDecryptCipher(byte[] bytes, out string plainText)
+        {
+            plainText = "";
+            if (bytes == null || bytes.Length < 32 || (bytes.Length - 16) % 16 != 0) return false;
+            try
+            {
                 using (Aes aes = Aes.Create())
                 {
-                    aes.Key = keyBytes;
+                    aes.Key = DeriveKey();
                     byte[] iv = new byte[16];
-                    Array.Copy(cipherBytes, 0, iv, 0, iv.Length);
+                    Array.Copy(bytes, 0, iv, 0, iv.Length);
                     aes.IV = iv;
-
                     using (MemoryStream ms = new MemoryStream())
                     {
                         using (CryptoStream cs = new CryptoStream(ms, aes.CreateDecryptor(), CryptoStreamMode.Write))
                         {
-                            cs.Write(cipherBytes, iv.Length, cipherBytes.Length - iv.Length);
+                            cs.Write(bytes, iv.Length, bytes.Length - iv.Length);
                             cs.FlushFinalBlock();
                         }
-                        return Encoding.UTF8.GetString(ms.ToArray());
+                        plainText = new UTF8Encoding(false, true).GetString(ms.ToArray());
                     }
                 }
+                return IsPlausiblePlainText(plainText);
             }
             catch
             {
-                // Decryption failed: fallback to legacy Base64 decoding or raw key
-                try
-                {
-                    byte[] bytes = Convert.FromBase64String(cipherText);
-                    return Encoding.UTF8.GetString(bytes);
-                }
-                catch
-                {
-                    return cipherText;
-                }
+                plainText = "";
+                return false;
+            }
+        }
+
+        private static bool TryDecodePrintableUtf8(byte[] bytes, out string text)
+        {
+            text = "";
+            try
+            {
+                text = new UTF8Encoding(false, true).GetString(bytes ?? new byte[0]);
+                return IsPlausiblePlainText(text);
+            }
+            catch
+            {
+                text = "";
+                return false;
+            }
+        }
+
+        private static bool IsPlausiblePlainText(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length > 4096) return false;
+            for (int i = 0; i < value.Length; i++)
+            {
+                if (char.IsControl(value[i]) || char.IsSurrogate(value[i])) return false;
+            }
+            return true;
+        }
+
+        private static byte[] DeriveKey()
+        {
+            string keyString = SystemInfo.deviceUniqueIdentifier;
+            if (string.IsNullOrEmpty(keyString) || keyString == "n/a")
+                keyString = "AIBridgeFallbackEncryptionKeySalt";
+            using (Rfc2898DeriveBytes deriveBytes = new Rfc2898DeriveBytes(keyString, Salt, 1000))
+            {
+                return deriveBytes.GetBytes(32);
             }
         }
     }

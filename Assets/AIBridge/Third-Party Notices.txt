@@ -1,0 +1,46 @@
+AI Bridge - Third-Party Notices
+Last reviewed: 2026-07-16
+
+This file lists third-party source code distributed inside AI Bridge. It does
+not replace the Unity Asset Store EULA that applies to AI Bridge as a product.
+
+-------------------------------------------------------------------------------
+LitJSON
+-------------------------------------------------------------------------------
+
+Bundled path:
+  Assets/AIBridge/Plugins/LitJson
+
+Component:
+  LitJSON JSON serializer source code
+
+License:
+  The Unlicense / public-domain dedication
+
+Upstream references:
+  https://www.nuget.org/packages/litjson
+  https://github.com/LitJSON/litjson
+
+Notice retained by the bundled source files:
+  "The authors disclaim copyright to this source code."
+
+Local integration notes:
+  - The source is compiled as the LitJson Unity assembly.
+  - AI Bridge contains local compatibility and warning-cleanup changes.
+  - Before Asset Store submission, the publisher must identify the exact
+    upstream version or commit used, record all local modifications, and verify
+    that the complete upstream COPYING/license terms applicable to that version
+    are preserved in the release package.
+
+The Unlicense permits use, copying, modification, publication, distribution,
+sublicensing, and sale without conditions, and provides the software without
+warranty. The authoritative full license text is available from the upstream
+project and the NuGet package page linked above.
+
+-------------------------------------------------------------------------------
+Other third-party content
+-------------------------------------------------------------------------------
+
+No other third-party code, fonts, audio, video, or art is declared by this
+notice. The publisher must update this file if the final release includes any
+additional third-party component or media.

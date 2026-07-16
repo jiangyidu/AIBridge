@@ -34,7 +34,7 @@
     "type": "function",
     "function": {
       "name": "compile_temp_method",
-      "description": "将一段 C# 静态方法代码写入独立 partial 临时命令文件并触发 Unity 编译。调用后会返回 {\"Status\":\"compiling\"}，必须调用 check_compile_status 轮询，直到 {\"Status\":\"done\"} 后再调用 execute_command。编译失败时 Unity 会删除本次生成文件以避免污染主 AITempCommands.cs。禁止在 code 中使用 EditorApplication.update 注册。",
+      "description": "将一段 C# 静态方法代码写入独立 partial 临时命令文件并触发 Unity 编译。宿主会跨 Domain Reload 自动等待事务结束，并把最终成功或错误结果返回；不要自行轮询。编译成功后如需执行，再单独调用 execute_command。编译失败时 Unity 会删除本次生成文件以避免污染主 AITempCommands.cs。禁止在 code 中使用 EditorApplication.update 注册。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -65,7 +65,7 @@
     "type": "function",
     "function": {
       "name": "compile_script",
-      "description": "将一个完整的 MonoBehaviour C# 脚本文件写入 Assets/Scripts/AITemp/ 并触发 Unity 编译。调用后会返回 {\"Status\":\"compiling\"}，必须调用 check_compile_status 轮询，直到 {\"Status\":\"done\"} 后再调用 execute_command AttachScriptToGameObject 挂载脚本。编译失败时会删除本次生成文件。",
+      "description": "将一个完整的 MonoBehaviour C# 脚本文件写入 Assets/Scripts/AITemp/ 并触发 Unity 编译。宿主会跨 Domain Reload 自动等待事务结束，并把最终成功或错误结果返回；不要自行轮询。编译成功后可调用 attach_script 挂载脚本，编译失败时会删除本次生成文件。",
       "parameters": {
         "type": "object",
         "properties": {
@@ -86,18 +86,6 @@
           "filename",
           "code"
         ]
-      }
-    }
-  },
-  {
-    "type": "function",
-    "function": {
-      "name": "check_compile_status",
-      "description": "查询当前 Unity 编译进度。在调用 compile_temp_method 或 compile_script 之后必须调用此工具轮询，直到收到 {\"Status\":\"done\"}（成功）或 {\"Status\":\"error\"}（失败）。收到 {\"Status\":\"compiling\"} 时请稍等片刻后再次调用。",
-      "parameters": {
-        "type": "object",
-        "properties": {},
-        "required": []
       }
     }
   },
@@ -329,7 +317,7 @@
           },
           "scriptName": {
             "type": "string",
-            "description": "MonoBehaviour 脚本类名，例如 'TrianglePathMover'。确保类已加载（list_ai_scripts 中 compiled 为 true 或 check_compile_status 提示 done）"
+            "description": "MonoBehaviour 脚本类名，例如 'TrianglePathMover'。确保编译工具已返回成功，且 list_ai_scripts 中 compiled 为 true。"
           }
         },
         "required": [

@@ -3,6 +3,10 @@
     "zh": "AI 助手",
     "en": "AI Assistant"
   },
+  "window_subtitle": {
+    "zh": "Unity 编辑器内 AI 桥接",
+    "en": "In-Editor AI Bridge"
+  },
   "mode_label": {
     "zh": "模式：",
     "en": "Mode: "
@@ -15,17 +19,17 @@
     "zh": "Ollama 本地",
     "en": "Ollama Local"
   },
-  "python_agent_label": {
-    "zh": "Python 智能体",
-    "en": "Python Agent"
-  },
   "status_running": {
     "zh": "运行中",
     "en": "Running"
   },
-  "status_ready": {
-    "zh": "就绪",
-    "en": "Ready"
+  "status_recovery_failed": {
+    "zh": "状态恢复失败",
+    "en": "Recovery Failed"
+  },
+  "status_idle": {
+    "zh": "空闲",
+    "en": "Idle"
   },
   "toggle_config": {
     "zh": "配置",
@@ -60,16 +64,8 @@
     "en": "Cancel"
   },
   "agent_executing": {
-    "zh": "🤖 智能体正在执行 {0}",
-    "en": "🤖 Agent is executing {0}"
-  },
-  "agent_processing": {
-    "zh": "🤖 Python 智能体正在处理请求...",
-    "en": "🤖 Python Agent is processing request..."
-  },
-  "config_title": {
-    "zh": "Python 智能体配置（Unity 只负责传递配置，不直接调用大语言模型）",
-    "en": "Python Agent Config (Unity only passes config, does not call LLM directly)"
+    "zh": "智能体正在执行 {0}",
+    "en": "Agent is executing {0}"
   },
   "config_provider": {
     "zh": "服务商",
@@ -100,28 +96,12 @@
     "en": "Max Agent Steps"
   },
   "config_system_prompt_label": {
-    "zh": "额外系统提示词（会作为用户附加提示词传给 Python，由 Python 构建最终提示词）",
-    "en": "Extra System Prompt (passed to Python as user constraints, Python builds final Prompt)"
+    "zh": "额外系统提示词（由纯 C# Agent 合并到最终提示词）",
+    "en": "Extra System Prompt (merged by the pure C# Agent)"
   },
-  "config_python_service": {
-    "zh": "Python 服务",
-    "en": "Python Service"
-  },
-  "btn_detect_service": {
-    "zh": "启动/检测",
-    "en": "Start/Detect"
-  },
-  "dialog_env_error": {
-    "zh": "环境异常",
-    "en": "Environment Exception"
-  },
-  "dialog_env_error_msg": {
-    "zh": "无法连接到 Python 智能体服务。可能是缺少 Python 环境或依赖包。\n\n是否打开【环境配置向导】进行自动修复？",
-    "en": "Cannot connect to Python Agent Service. Python environment or dependency packages may be missing.\n\nDo you want to open the [Environment Setup Wizard] for automatic repair?"
-  },
-  "dialog_open_wizard": {
-    "zh": "打开向导",
-    "en": "Open Wizard"
+  "btn_environment_check": {
+    "zh": "环境检查",
+    "en": "Environment Check"
   },
   "btn_copy": {
     "zh": "复制",
@@ -143,9 +123,13 @@
     "zh": "显示思考过程",
     "en": "Show reasoning_content"
   },
-  "status_waiting": {
-    "zh": "等待中...",
-    "en": "Waiting..."
+  "toggle_lock_chat_scroll": {
+    "zh": "锁定滚动",
+    "en": "Lock scrolling"
+  },
+  "toggle_lock_chat_scroll_hint": {
+    "zh": "勾选后保留手动滚动位置；取消勾选后自动跟随最新内容",
+    "en": "Keep the manual scroll position when enabled; follow the latest message when disabled"
   },
   "btn_send": {
     "zh": "发送",
@@ -155,149 +139,25 @@
     "zh": "Unity 执行端命令",
     "en": "Unity Execution Commands"
   },
-  "btn_refresh_list": {
-    "zh": "刷新列表",
-    "en": "Refresh List"
+  "btn_execute": {
+    "zh": "执行",
+    "en": "Run"
   },
-  "cmd_search_label": {
-    "zh": "搜索",
-    "en": "Search"
+  "btn_parameters": {
+    "zh": "参数",
+    "en": "Args"
   },
-  "btn_manual_exec": {
-    "zh": "▶ 手动执行",
-    "en": "▶ Execute Manually"
+  "btn_collapse": {
+    "zh": "收起",
+    "en": "Close"
   },
   "err_bridge_not_running": {
-    "zh": "[错误] Unity 代理桥接器 (AgentBridge) 未能启动。请先确认控制台 (Console) 没有 C# 编译错误，然后执行菜单 AIBridge/Start Agent Bridge。",
-    "en": "[Error] Unity AgentBridge failed to start. Please verify there are no C# compilation errors in Console, then run menu AIBridge/Start Agent Bridge."
-  },
-  "err_service_not_running": {
-    "zh": "[错误] 无法启动或连接 Python 智能体服务，请确认系统可执行 python，并查看控制台输出。",
-    "en": "[Error] Unable to start or connect to Python Agent Service. Please verify Python is executable and check Console output."
-  },
-  "msg_session_started": {
-    "zh": "[Python 智能体] 会话已启动：{0}",
-    "en": "[Python Agent] Session started: {0}"
-  },
-  "err_session_start_failed": {
-    "zh": "[错误] Python 智能体服务未能启动会话：{0}",
-    "en": "[Error] Python Agent Service failed to start session: {0}"
-  },
-  "err_session_start_exception": {
-    "zh": "[错误] 启动 Python 智能体会话失败：{0}",
-    "en": "[Error] Failed to start Python Agent session: {0}"
-  },
-  "err_poll_timeout": {
-    "zh": "[错误] 长时间无法从 Python 智能体服务获取会话事件，已停止当前界面等待状态。",
-    "en": "[Error] Unable to get session events from Python Agent Service for a long time. Stopped waiting."
-  },
-  "msg_session_terminated": {
-    "zh": "[系统] ⏹ 用户手动终止了智能体会话。",
-    "en": "[System] ⏹ Agent session manually terminated by user."
+    "zh": "[错误] 进程内 AgentBridge 不可用。请先确认控制台没有 C# 编译错误。",
+    "en": "[Error] The in-process AgentBridge is unavailable. Fix C# compilation errors in Console first."
   },
   "msg_manual_exec_result": {
-    "zh": "[手动执行] {0} → {1}",
-    "en": "[Manual Execution] {0} → {1}"
-  },
-  "wizard_title": {
-    "zh": "AIBridge 环境向导",
-    "en": "AIBridge Environment Wizard"
-  },
-  "wizard_header": {
-    "zh": "🤖 AIBridge 环境配置向导",
-    "en": "🤖 AIBridge Environment Setup Wizard"
-  },
-  "wizard_welcome_status": {
-    "zh": "欢迎使用 AIBridge。在开始之前，我们需要检查您的 Python 环境。",
-    "en": "Welcome to AIBridge. Before starting, we need to check your Python environment."
-  },
-  "wizard_checking_status": {
-    "zh": "准备检测 Python 环境...",
-    "en": "Preparing to check Python environment..."
-  },
-  "wizard_progress_title": {
-    "zh": "配置进度",
-    "en": "Setup Progress"
-  },
-  "wizard_btn_start_check": {
-    "zh": "开始检测环境",
-    "en": "Start Check"
-  },
-  "wizard_btn_wait": {
-    "zh": "请稍候...",
-    "en": "Please wait..."
-  },
-  "wizard_btn_download_python": {
-    "zh": "下载 Python",
-    "en": "Download Python"
-  },
-  "wizard_btn_recheck": {
-    "zh": "重新检测",
-    "en": "Recheck"
-  },
-  "wizard_btn_install_deps": {
-    "zh": "一键安装依赖",
-    "en": "Install Dependencies"
-  },
-  "wizard_btn_skip": {
-    "zh": "跳过",
-    "en": "Skip"
-  },
-  "wizard_btn_open_assistant": {
-    "zh": "打开 AI 助手",
-    "en": "Open AI Assistant"
-  },
-  "wizard_python_not_found": {
-    "zh": "<b><color=red>未检测到 Python 运行环境</color></b>\n\nAIBridge 的后台智能体需要 Python 支持。",
-    "en": "<b><color=red>Python runtime environment not detected</color></b>\n\nAIBridge's backend Agent requires Python support."
-  },
-  "wizard_python_not_found_err": {
-    "zh": "建议：\n1. 点击下方按钮前往官网下载 Python (推荐 3.8+)\n2. <b>安装时务必勾选 \"将 Python 添加到环境变量 (Add Python to PATH)\"</b>\n3. 安装完成后可能需要重启 Unity 或电脑",
-    "en": "Suggestions:\n1. Click the button below to download Python from the official site (3.8+ recommended)\n2. <b>Make sure to check \"Add Python to PATH\" during installation</b>\n3. Restart Unity or your computer after installation if needed"
-  },
-  "wizard_detecting_python": {
-    "zh": "正在检测系统中的 Python...\n(尝试命令: {0} --version)",
-    "en": "Checking Python in the system...\n(Trying command: {0} --version)"
-  },
-  "wizard_python_detected": {
-    "zh": "检测到 Python：<b>{0}</b> (命令: {1})\n准备检测必要的 Python 依赖包 (requests)...",
-    "en": "Detected Python: <b>{0}</b> (Command: {1})\nPreparing to check required Python package (requests)..."
-  },
-  "wizard_all_set_status": {
-    "zh": "<b><color=green>环境配置完美！</color></b>\n\n- Python 启动命令: {0}\n- Python 版本: {1}\n- 依赖包: 全部就绪\n\n您现在可以开始使用 AI 助手了。",
-    "en": "<b><color=green>Environment setup is perfect!</color></b>\n\n- Python Startup Command: {0}\n- Python Version: {1}\n- Dependencies: All Ready\n\nYou can now start using the AI Assistant."
-  },
-  "wizard_missing_deps": {
-    "zh": "检测到 Python ({0})，使用命令 `{1}`，但<b><color=#e68a00>缺失必要的依赖包</color></b>。\n\nAIBridge 需要 `requests` 依赖库来与大语言模型 (LLM) 接口以及 Unity 进行 HTTP 通信。",
-    "en": "Detected Python ({0}) using command `{1}`, but <b><color=#e68a00>missing required dependency packages</color></b>.\n\nAIBridge requires the `requests` library to communicate with LLM APIs and Unity via HTTP."
-  },
-  "wizard_missing_deps_err": {
-    "zh": "请点击下方「一键安装依赖」使用包管理工具 (pip) 进行安装。",
-    "en": "Please click 'Install Dependencies' below to install via pip."
-  },
-  "wizard_installing_deps": {
-    "zh": "正在使用 pip 安装 requests 依赖库，请稍候...\n这可能需要一两分钟，具体取决于您的网络状态。\n\n(执行命令: {0} -m pip install requests)",
-    "en": "Installing requests library via pip, please wait...\nThis might take a minute or two depending on your network.\n\n(Command: {0} -m pip install requests)"
-  },
-  "wizard_install_success": {
-    "zh": "<b><color=green>依赖安装成功！</color></b>\n\n- Python 启动命令: {0}\n- Python 版本: {1}\n- 依赖包: 全部就绪\n\n您现在可以开始使用 AI 助手了。",
-    "en": "<b><color=green>Dependencies installed successfully!</color></b>\n\n- Python Startup Command: {0}\n- Python Version: {1}\n- Dependencies: All Ready\n\nYou can now start using the AI Assistant."
-  },
-  "wizard_install_failed": {
-    "zh": "<b><color=red>依赖安装失败</color></b>\n可能是因为网络问题或包管理工具 (pip) 未正确配置。",
-    "en": "<b><color=red>Dependency installation failed</color></b>\nThis might be due to network issues or pip not being properly configured."
-  },
-  "wizard_install_failed_err": {
-    "zh": "错误信息:\n{0}\n{1}\n\n您可以尝试手动在命令行中运行: {2} -m pip install requests",
-    "en": "Error Message:\n{0}\n{1}\n\nYou can try running this manually in the command line: {2} -m pip install requests"
-  },
-  "wizard_skip_status": {
-    "zh": "<b><color=green>配置完成！</color></b>\n虽然跳过了依赖安装，您仍可以尝试运行智能体。",
-    "en": "<b><color=green>Setup completed!</color></b>\nAlthough dependency installation was skipped, you can still try running the Agent."
-  },
-  "wizard_timeout": {
-    "zh": "操作超时 (可能命令被阻止或弹出窗口)",
-    "en": "Operation timeout (command might be blocked or prompt popped up)"
+    "zh": "[手动执行] {0} => {1}",
+    "en": "[Manual Execution] {0} => {1}"
   },
   "provider_tongyi": {
     "zh": "通义千问",
@@ -311,101 +171,33 @@
     "zh": "自定义",
     "en": "Custom"
   },
-  "step_request_llm": {
-    "zh": "请求大语言模型 (LLM)",
-    "en": "Requesting LLM"
-  },
-  "agent_session_started": {
-    "zh": "智能体会话已启动",
-    "en": "Agent session started"
-  },
-  "step_request_llm_decision": {
-    "zh": "[步骤 {0}/{1}] 请求大语言模型决策",
-    "en": "[Step {0}/{1}] Requesting LLM decision"
-  },
-  "err_no_content_or_tool": {
-    "zh": "[智能体] 模型未返回文本内容，也没有工具调用。",
-    "en": "[Agent] Model returned no content and no tool calls."
-  },
-  "step_call_tool": {
-    "zh": "[步骤 {0}] 🔧 调用工具 `{1}`\n```json\n{2}\n```",
-    "en": "[Step {0}] 🔧 Calling tool `{1}`\n```json\n{2}\n```"
-  },
-  "step_tool_returned": {
-    "zh": "[步骤 {0}] ✅ `{1}` 返回：\n```json\n{2}\n```",
-    "en": "[Step {0}] ✅ `{1}` returned:\n```json\n{2}\n```"
-  },
-  "err_max_steps_reached": {
-    "zh": "[智能体] 已达到最大步骤数 {0}，请检查是否存在循环调用或工具错误。",
-    "en": "[Agent] Max steps {0} reached, please check for infinite loops or tool errors."
-  },
-  "err_bridge_offline": {
-    "zh": "[智能体错误] {0} 代理桥接器 (AgentBridge) 未连接，已停止本次会话。\n请先确认宿主应用已启动 AgentBridge 服务，且 Python 端可访问 {1}/ping。",
-    "en": "[Agent Error] {0} AgentBridge is offline, session stopped.\nPlease ensure that the host app has started the AgentBridge service and Python can access {1}/ping."
-  },
-  "err_bridge_offline_during_tool": {
-    "zh": "[智能体错误] {0} 代理桥接器 (AgentBridge) 已离线，本次会话停止，避免继续卡在工具调用。",
-    "en": "[Agent Error] {0} AgentBridge went offline, session stopped to prevent hanging on tool call."
-  },
   "conversation_title": {
     "zh": "会话",
     "en": "Conversation"
-  },
-  "agent_badge": {
-    "zh": "智能体：Python",
-    "en": "Agent: Python"
   },
   "category_all": {
     "zh": "全部",
     "en": "All"
   },
-  "msg_detecting_service": {
-    "zh": "正在检测 Python Agent Service 与 Unity 执行端...",
-    "en": "Checking Python Agent Service and Unity command bridge..."
+  "dialog_environment_check_title": {
+    "zh": "环境检查",
+    "en": "Environment Check"
   },
-  "msg_service_check_failed": {
-    "zh": "Python Agent Service 检测异常：{0}",
-    "en": "Python Agent Service check failed: {0}"
+  "environment_check_success": {
+    "zh": "环境检查通过。\n\nUnity：{0}\n状态目录：{1}\n脚本域：{2}\n活动会话：{3}",
+    "en": "Environment check passed.\n\nUnity: {0}\nState directory: {1}\nDomain: {2}\nActive session: {3}"
   },
-  "msg_service_no_response": {
-    "zh": "Python Agent Service 未能启动或未响应。请检查 Python 路径、run_agent_service.py、端口占用和依赖安装。",
-    "en": "Python Agent Service is not responding. Check Python path, run_agent_service.py, port usage, and dependencies."
+  "environment_check_failed": {
+    "zh": "环境检查未通过：\n\n{0}",
+    "en": "Environment check failed:\n\n{0}"
   },
-  "msg_bridge_check_failed": {
-    "zh": "Unity 执行端检测异常：{0}",
-    "en": "Unity command bridge check failed: {0}"
+  "value_yes": {
+    "zh": "是",
+    "en": "Yes"
   },
-  "msg_check_completed": {
-    "zh": "检测完成：Python Agent Service 正常，Unity 执行端可用。",
-    "en": "Check completed: Python Agent Service is healthy and Unity command bridge is available."
-  },
-  "dialog_detect_title": {
-    "zh": "启动 / 检测",
-    "en": "Start / Check"
-  },
-  "dialog_detect_success": {
-    "zh": "检测成功：Python Agent Service 与 Unity 执行端均可用。",
-    "en": "Success: Python Agent Service and Unity command bridge are available."
-  },
-  "msg_bridge_not_ready": {
-    "zh": "Python Agent Service 已可用，但 Unity 执行端未就绪。发送任务前请确认 AgentBridge 服务能正常启动。",
-    "en": "Python Agent Service is available, but Unity command bridge is not ready. Make sure AgentBridge can start before sending tasks."
-  },
-  "dialog_detect_bridge_not_ready": {
-    "zh": "Python Agent Service 可用，但 Unity 执行端未就绪。详情已写入会话。",
-    "en": "Python Agent Service is available, but Unity command bridge is not ready. Details were added to the session."
-  },
-  "config_title_new": {
-    "zh": "Python 智能体配置",
-    "en": "Python Agent Config"
-  },
-  "config_subtitle": {
-    "zh": "（Unity 只负责执行命令，不直接调用 LLM）",
-    "en": "(Unity only executes commands; Python handles LLM calls)"
-  },
-  "empty_chat_hint": {
-    "zh": "输入任务后，Python Agent 会在这里显示执行过程与结果。",
-    "en": "After entering a task, the Python Agent will display the execution process and results here."
+  "value_no": {
+    "zh": "否",
+    "en": "No"
   },
   "cmd_panel_subtitle": {
     "zh": "搜索、分类、手动执行 Unity 命令",
@@ -423,28 +215,36 @@
     "zh": "已刷新 Unity 执行命令列表。",
     "en": "Unity command list refreshed."
   },
+  "cmd_no_matches": {
+    "zh": "没有匹配的命令",
+    "en": "No matching commands"
+  },
   "btn_copy_all": {
     "zh": "复制全文",
     "en": "Copy All"
   },
-  "templates_title": {
-    "zh": "快捷指令:",
-    "en": "Templates:"
+  "config_title": {
+    "zh": "模型与执行设置",
+    "en": "Model and Execution Settings"
   },
-  "template_create_cube": {
-    "zh": "创建立方体",
-    "en": "Create Cube"
+  "config_subtitle": {
+    "zh": "连接、模型与执行权限",
+    "en": "Connection, model, and execution permissions"
   },
-  "template_check_hierarchy": {
-    "zh": "检查层级",
-    "en": "Check Scene"
+  "config_execute_generated": {
+    "zh": "执行生成代码",
+    "en": "Run Generated Code"
   },
-  "template_clean_scene": {
-    "zh": "清理场景",
-    "en": "Clean Scene"
+  "config_execute_generated_hint": {
+    "zh": "允许自动执行 AI 生成的临时代码（默认关闭）",
+    "en": "Allow automatic execution of AI-generated temporary code (off by default)"
   },
-  "template_create_script": {
-    "zh": "生成脚本",
-    "en": "Create Script"
+  "empty_chat_hint_csharp": {
+    "zh": "输入任务后，C# Agent 会在这里显示可恢复的执行过程与结果。",
+    "en": "The recoverable C# Agent workflow will appear here."
+  },
+  "agent_processing_csharp": {
+    "zh": "C# Agent 正在处理请求...",
+    "en": "C# Agent is processing the request..."
   }
 }

@@ -1,15 +1,8 @@
-# Basic Setup Sample
+# Basic Setup
 
-This sample contains a minimal pre-configured scene to test your setup and send your first message to the AI Agent.
+1. Import AI Bridge and wait for Unity compilation.
+2. Open `Tools > AIBridge > AI Assistant` and optionally run `Environment Check`.
+3. Configure a remote API or Ollama endpoint.
+4. Try a read-only scene query, then create an undoable cube.
 
-## How to Use
-
-1. Open the [SampleScene.unity](file:///f:/otherProject/AIBridge2026617/Assets/AIBridge/Samples/BasicSetup/SampleScene.unity) in the Unity Editor.
-2. In the top menu, go to `AIBridge -> Environment Setup Wizard` to verify your Python environment and package dependencies.
-3. Once the environment is ready, open the chat window by clicking `AIBridge -> AI Assistant` in the top menu.
-4. Expand the **配置 (Configuration)** panel:
-   - Paste your API Key and choose your cloud provider (e.g. DeepSeek, Gemini, Claude), or
-   - Enter your local Ollama details.
-5. In the chat input, type a prompt like:
-   > "Create a red cube at the center of the scene."
-6. Watch the AI Agent automatically run, compile the necessary action, and create the cube in your scene!
+AI Bridge needs no external runtime or proxy process. Generated code is compiled first and is not executed automatically by default.

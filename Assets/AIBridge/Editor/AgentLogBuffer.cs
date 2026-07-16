@@ -28,6 +28,7 @@ namespace AIBridge.Agent
 
         static AgentLogBuffer()
         {
+            if (AgentEditorEnvironment.IsAssetImportWorker) return;
             Application.logMessageReceived += OnLogMessage;
         }
 

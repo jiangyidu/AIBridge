@@ -1,34 +1,24 @@
 # Changelog
 
-All notable changes to the **AI Bridge** project will be documented in this file.
+## 2.0.0
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-
----
-
-## [1.0.0] - 2026-06-18
-
-This is the initial release of the **AI Bridge** framework, establishing a solid foundational bridge between local/remote LLM Agents and the Unity Editor.
-
-### Added
-- **Core Architecture & Communications**:
-  - Implemented Unity HTTP server (`AgentBridge`) using `HttpListener` running in a background thread with safe lifecycle callbacks (`InitializeOnLoad`).
-  - Added deterministic hashed port calculation based on the project path MD5 to prevent port collision when running multiple projects.
-  - Implemented `AgentController/agent_port.txt` file generation to allow local Python tools to discover active Unity instances automatically.
-- **Python Agent Orchestration (`python_agent`)**:
-  - Created a local Python-side HTTP service (`service.py`) to manage asynchronous agent sessions, stream step-by-step events, and maintain persistent JSON history logs (`ai_chat_history.json`).
-  - Added `AgentRunner` (`agent_core.py`) with a full ReAct loop supporting parallel tool call parsing, execution, and cancel tokens.
-  - Added an engine-agnostic `EngineClient` base class to encapsulate core HTTP routing, timeout configurations, and retries.
-  - Added `UnityClient` extending `EngineClient` with Unity-specific paths, URL resolutions, and script compilation steps.
-- **Dynamic C# Compilation**:
-  - Integrated `compile_temp_method` tool allowing models to inject custom C# static methods decorated with `[AgentCommand]` into `AITempCommands.cs` on the fly.
-  - Integrated `compile_script` tool allowing models to write entire custom `MonoBehaviour` scripts to the asset folder and dynamically compile them.
-  - Added a compiler polling workflow utilizing the `check_compile_status` endpoint and diagnostic helper `get_compile_errors`.
-- **Unity Editor UI & Wizards**:
-  - Added `AIAssistantWindow.cs`, a custom Editor window featuring a responsive chat pane, model provider dropdowns (Ollama, DeepSeek, Claude, Gemini, etc.), custom system prompts, and a manual command execution pane.
-  - Added support for displaying reasoning tokens (`reasoning_content`) for modern reasoning models.
-  - Added `AIBridgeSetupWizard.cs` environment assistant to check for Python environments and dependencies, providing one-click pip installation for the `requests` package.
-- **CLI Utilities**:
-  - Added `unity_agent_controller.py` providing command-line arguments to list, wait for compilation, and run Unity commands.
-  - Added offline fallback routing using Unity `-batchmode` CLI when the editor is closed.
+- Replaced the legacy Python service, package installation, port discovery, and proxy process with an Editor-only pure C# Agent.
+- Added durable Domain Reload recovery, bounded LLM retries, and non-replay handling for uncertain ordinary tools.
+- Fixed LitJson treating small JSON integers such as `0` as `Int32`, which prevented `Int64` state fields from loading and stopped the Agent after a successful compile-triggered Domain Reload.
+- Corrupt state files are now preserved and retried at a low frequency with an explicit UI error instead of being reparsed and logged every editor frame.
+- Authentication, billing, and invalid-request failures now stop immediately; only timeouts, 429, and 5xx failures use bounded retries.
+- Added versioned AES API-key storage before session start so Domain Reload can recover credentials without ever sending undecryptable legacy ciphertext.
+- Added transactional generated-source compilation with backups, hashes, full-cycle errors, rollback compilation, and post-reload target validation.
+- Separated compilation from execution and disabled automatic execution of generated code by default.
+- Added dangerous-source checks and an integrated pure C# environment check in the assistant window.
+- Limited automatic Agent initialization to the main Editor process so Asset Import Workers cannot load sessions, scan commands, or advance compile transactions.
+- Stale active sessions are now stopped after a five-minute interruption instead of replaying old operations against an unknown project state.
+- Command execution now accepts only public static methods marked with `[AgentCommand]`; removed unused 1.x server/port/batch APIs, the test API, and the unrelated generic `GameUtility` command library.
+- Cached and validated `AgentTools.json`, removed the obsolete model-facing compile polling tool, and made the host the single owner of compile transaction polling.
+- Sanitized unsupported decorative symbols in rendered chat content and removed them from controls to prevent per-repaint missing-glyph warnings from flooding `Editor.log`.
+- Added a persistent chat scroll lock toggle: unlocked conversations follow the latest message, while locked conversations preserve manual scrolling.
+- Simplified the operation window to one contextual send/stop action, one command execution path, integrated environment validation, dynamic command categories, and protected controls while an Agent session is running.
+- Removed an ineffective method-level CLS attribute from the bundled LitJson source to eliminate its package-originated `CS3021` warning.
+- Removed the redundant standalone environment wizard; the main window owns the pure C# environment check, with Unity 2018.4 as the minimum supported version.
+- Moved the window to `Tools/AIBridge/AI Assistant` and removed import-time creation of user files outside the package root.
+- Made successful command-registry scans silent by default; define `AIBRIDGE_VERBOSE_LOGS` when diagnostic scan logs are required.
