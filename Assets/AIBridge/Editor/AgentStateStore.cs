@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using LitJson;
@@ -13,8 +14,30 @@ namespace AIBridge.Agent
     public static class AgentStateStore
     {
         private static readonly object Gate = new object();
+        private static readonly Dictionary<string, LoadFailure> LoadFailures =
+            new Dictionary<string, LoadFailure>(StringComparer.OrdinalIgnoreCase);
+
+        private sealed class LoadFailure
+        {
+            public string fingerprint = "";
+            public string message = "";
+        }
+
+        static AgentStateStore()
+        {
+            // LitJson 将 JSON 中处于 Int32 范围的整数标记为 Int，而不会自动拓宽到 Int64。
+            // Agent 状态中的 tick/revision 字段即使当前值为 0，也必须能恢复为 long。
+            JsonMapper.RegisterImporter<int, long>(delegate(int value) { return Convert.ToInt64(value); });
+        }
 
         public static event Action StateSaved;
+
+        public static string LastSessionLoadError { get; private set; }
+
+        public static bool HasSessionFile
+        {
+            get { return File.Exists(SessionPath) || File.Exists(SessionPath + ".bak"); }
+        }
 
         public static string StateDirectory
         {
@@ -43,7 +66,9 @@ namespace AIBridge.Agent
 
         public static AgentSessionState LoadSession()
         {
-            AgentSessionState state = LoadWithBackup<AgentSessionState>(SessionPath);
+            string loadError;
+            AgentSessionState state = LoadWithBackup<AgentSessionState>(SessionPath, out loadError);
+            LastSessionLoadError = loadError;
             if (state != null && state.schemaVersion < 2)
             {
                 // v1 没有 requireApiKey。升级中的远程会话按安全默认值处理，防止
@@ -67,7 +92,8 @@ namespace AIBridge.Agent
 
         public static AgentCompileTransactionState LoadCompile()
         {
-            return LoadWithBackup<AgentCompileTransactionState>(CompilePath);
+            string ignored;
+            return LoadWithBackup<AgentCompileTransactionState>(CompilePath, out ignored);
         }
 
         public static void SaveCompile(AgentCompileTransactionState state)
@@ -124,28 +150,75 @@ namespace AIBridge.Agent
             lock (Gate) WriteAtomic(path, text ?? "");
         }
 
-        private static T LoadWithBackup<T>(string path) where T : class
+        private static T LoadWithBackup<T>(string path, out string loadError) where T : class
         {
             lock (Gate)
             {
-                T value = TryLoad<T>(path);
-                if (value != null) return value;
-                return TryLoad<T>(path + ".bak");
+                string primaryError;
+                T value = TryLoad<T>(path, out primaryError);
+                if (value != null)
+                {
+                    loadError = "";
+                    return value;
+                }
+
+                string backupError;
+                value = TryLoad<T>(path + ".bak", out backupError);
+                if (value != null)
+                {
+                    loadError = "";
+                    return value;
+                }
+
+                if (!string.IsNullOrEmpty(primaryError) && !string.IsNullOrEmpty(backupError))
+                    loadError = primaryError + "；备份同样无法读取：" + backupError;
+                else
+                    loadError = !string.IsNullOrEmpty(primaryError) ? primaryError : backupError;
+                return null;
             }
         }
 
-        private static T TryLoad<T>(string path) where T : class
+        private static T TryLoad<T>(string path, out string loadError) where T : class
         {
+            loadError = "";
             try
             {
-                if (!File.Exists(path)) return null;
+                if (!File.Exists(path))
+                {
+                    LoadFailures.Remove(path);
+                    return null;
+                }
+
+                FileInfo info = new FileInfo(path);
+                string fingerprint = info.Length + ":" + info.LastWriteTimeUtc.Ticks;
+                LoadFailure cached;
+                if (LoadFailures.TryGetValue(path, out cached) && cached.fingerprint == fingerprint)
+                {
+                    loadError = cached.message;
+                    return null;
+                }
+
                 string json = File.ReadAllText(path, Encoding.UTF8);
-                if (string.IsNullOrEmpty(json)) return null;
-                return JsonMapper.ToObject<T>(json);
+                if (string.IsNullOrEmpty(json)) throw new JsonException("状态文件为空");
+                T value = JsonMapper.ToObject<T>(json);
+                LoadFailures.Remove(path);
+                return value;
             }
             catch (Exception ex)
             {
-                Debug.LogWarning("[AIBridge] 无法读取状态文件 " + path + ": " + ex.Message);
+                string fingerprint = "unavailable";
+                try
+                {
+                    FileInfo info = new FileInfo(path);
+                    fingerprint = info.Length + ":" + info.LastWriteTimeUtc.Ticks;
+                }
+                catch { }
+
+                loadError = "无法读取状态文件 " + path + ": " + ex.Message;
+                LoadFailure previous;
+                bool shouldLog = !LoadFailures.TryGetValue(path, out previous) || previous.fingerprint != fingerprint;
+                LoadFailures[path] = new LoadFailure { fingerprint = fingerprint, message = loadError };
+                if (shouldLog) Debug.LogWarning("[AIBridge] " + loadError);
                 return null;
             }
         }

@@ -15,16 +15,19 @@ namespace AIBridge.Agent
     public static class PureCSharpAgent
     {
         private const int MaxLlmAttempts = 3;
+        private const double FailedSessionRetrySeconds = 5.0;
         private static AgentSessionState _state;
         private static AgentLlmOperation _llmOperation;
         private static string _inMemoryApiKey = "";
         private static bool _resumeHandled;
+        private static bool _sessionLoadFailed;
+        private static double _nextSessionLoadAttempt;
 
         public static event Action StateChanged;
 
         static PureCSharpAgent()
         {
-            _state = AgentStateStore.LoadSession();
+            LoadSessionIntoMemory();
             EditorApplication.update -= Tick;
             EditorApplication.update += Tick;
             AssemblyReloadEvents.beforeAssemblyReload -= BeforeAssemblyReload;
@@ -57,12 +60,27 @@ namespace AIBridge.Agent
             get { return _state; }
         }
 
+        public static bool HasStateRecoveryFailure
+        {
+            get { return _sessionLoadFailed; }
+        }
+
+        public static string StateRecoveryError
+        {
+            get { return _sessionLoadFailed && _state != null ? _state.lastError : ""; }
+        }
+
         public static bool StartSession(
             AgentSessionConfig config,
             IList<AgentMessageState> conversation,
             out string error)
         {
             error = "";
+            if (_sessionLoadFailed)
+            {
+                error = "现有 Agent 状态恢复失败。为避免覆盖未完成任务，已阻止启动新会话：" + StateRecoveryError;
+                return false;
+            }
             if (config == null)
             {
                 error = "Agent 配置不能为空";
@@ -130,6 +148,7 @@ namespace AIBridge.Agent
             }
 
             _state = state;
+            _sessionLoadFailed = false;
             SaveState();
             AgentStateStore.AppendHistory("system", "[C# Agent] 会话已启动：" + state.sessionId, "");
             return true;
@@ -148,12 +167,19 @@ namespace AIBridge.Agent
         {
             if (_resumeHandled) return;
             _resumeHandled = true;
-            _state = AgentStateStore.LoadSession();
-            if (_state == null || !_state.active)
+            if (!LoadSessionIntoMemory() || _state == null || !_state.active)
             {
                 NotifyChanged();
                 return;
             }
+
+            ResumeLoadedActiveSession();
+            NotifyChanged();
+        }
+
+        private static void ResumeLoadedActiveSession()
+        {
+            if (_state == null || !_state.active) return;
 
             if (_state.phase == AgentRunPhase.WaitingLlm)
             {
@@ -190,20 +216,28 @@ namespace AIBridge.Agent
             {
                 CompleteUncertainPreparedTool();
             }
-
-            NotifyChanged();
         }
 
         private static void BeforeAssemblyReload()
         {
-            if (_state != null) AgentStateStore.SaveSession(_state);
+            // 恢复失败占位状态只存在内存，绝不能覆盖原始损坏文件及其备份。
+            if (!_sessionLoadFailed && _state != null) AgentStateStore.SaveSession(_state);
             DisposeLlmOperation();
         }
 
         private static void Tick()
         {
             CompileTransactionManager.Tick();
-            if (_state == null) _state = AgentStateStore.LoadSession();
+            if (_sessionLoadFailed)
+            {
+                RetryFailedSessionLoad();
+                return;
+            }
+            if (_state == null)
+            {
+                if (EditorApplication.timeSinceStartup < _nextSessionLoadAttempt) return;
+                if (!LoadSessionIntoMemory()) return;
+            }
             if (_state == null || !_state.active) return;
 
             if (_state.cancelRequested)
@@ -229,6 +263,60 @@ namespace AIBridge.Agent
                 PollCompileTransaction();
             else if (_state.phase == AgentRunPhase.ExecutingPreparedTool)
                 CompleteUncertainPreparedTool();
+        }
+
+        private static bool LoadSessionIntoMemory()
+        {
+            AgentSessionState loaded = AgentStateStore.LoadSession();
+            if (loaded != null)
+            {
+                _state = loaded;
+                _sessionLoadFailed = false;
+                _nextSessionLoadAttempt = 0;
+                return true;
+            }
+
+            string error = AgentStateStore.LastSessionLoadError;
+            if (AgentStateStore.HasSessionFile && !string.IsNullOrEmpty(error))
+            {
+                SetSessionLoadFailure(error);
+            }
+            else
+            {
+                _state = null;
+                _sessionLoadFailed = false;
+                _nextSessionLoadAttempt = EditorApplication.timeSinceStartup + 1.0;
+            }
+            return false;
+        }
+
+        private static void RetryFailedSessionLoad()
+        {
+            if (EditorApplication.timeSinceStartup < _nextSessionLoadAttempt) return;
+            AgentSessionState recovered = AgentStateStore.LoadSession();
+            if (recovered == null)
+            {
+                SetSessionLoadFailure(AgentStateStore.LastSessionLoadError);
+                return;
+            }
+
+            _state = recovered;
+            _sessionLoadFailed = false;
+            _nextSessionLoadAttempt = 0;
+            if (_state.active) ResumeLoadedActiveSession();
+            NotifyChanged();
+        }
+
+        private static void SetSessionLoadFailure(string error)
+        {
+            _sessionLoadFailed = true;
+            _nextSessionLoadAttempt = EditorApplication.timeSinceStartup + FailedSessionRetrySeconds;
+            AgentSessionState failed = new AgentSessionState();
+            failed.active = false;
+            failed.phase = AgentRunPhase.Failed;
+            failed.status = "Agent 状态恢复失败；保留原文件并低频重试";
+            failed.lastError = string.IsNullOrEmpty(error) ? "未知状态读取错误" : error;
+            _state = failed;
         }
 
         private static void BeginLlmRequest()
@@ -548,6 +636,7 @@ namespace AIBridge.Agent
 
         private static void SaveState()
         {
+            if (_sessionLoadFailed) return;
             AgentStateStore.SaveSession(_state);
             NotifyChanged();
         }

@@ -8,6 +8,10 @@
 4. 若阶段为 `FailedConflict`，说明生成文件在事务期间被其他操作修改；请人工比较文件和 `Library/AIBridge/backups`，不要强制覆盖。
 5. 若 Unity 仍显示正在编译，先解决编辑器的编译卡死。系统不会在编译过程中修改源码回滚。
 
+若 Console 出现 `Can't assign value '0' (type System.Int32) to type System.Int64`，说明旧版本在 Domain Reload 后无法反序列化 Agent 状态。更新插件后，状态机会兼容读取这些小整数并继续处理已完成的编译事务，无需删除 `Library/AIBridge`。
+
+若状态文件确实损坏，AI Assistant 会显示“状态恢复失败”，保留原文件并每 5 秒低频重试。此时不要启动新会话或删除活动事务；先备份 `Library/AIBridge`，再检查 `agent-state.json` 与 `.bak` 的内容。
+
 ## 生成脚本编译失败
 
 事务会自动保存错误、恢复原文件并再次编译。Agent 只有在恢复编译完成后才收到最终失败结果。不要在恢复过程中手动删除 `compile-state.json`。

@@ -98,6 +98,7 @@ namespace AIBridge.Agent
         private string _agentStepStatus = null;
         private int _agentStepCount = 0;
         private string _activeSessionId = null;
+        private bool _hasStateRecoveryFailure;
         private DateTime _lastHistoryLoad = DateTime.MinValue;
 
         private string[] _cmdArgs = new string[0];
@@ -186,10 +187,14 @@ namespace AIBridge.Agent
             EditorGUILayout.EndVertical();
 
             GUILayout.FlexibleSpace();
-            string statusStr = _isWaiting
-                ? "● " + AgentLocalization.Get("status_running", "Running")
-                : "● " + AgentLocalization.Get("status_ready", "Ready");
-            GUILayout.Label(statusStr, _isWaiting ? ModernUI.StatusRunning : ModernUI.StatusOnline, GUILayout.Width(116), GUILayout.Height(24));
+            string statusStr = _hasStateRecoveryFailure
+                ? "● 状态恢复失败"
+                : (_isWaiting
+                    ? "● " + AgentLocalization.Get("status_running", "Running")
+                    : "● " + AgentLocalization.Get("status_ready", "Ready"));
+            GUILayout.Label(statusStr,
+                (_isWaiting || _hasStateRecoveryFailure) ? ModernUI.StatusRunning : ModernUI.StatusOnline,
+                GUILayout.Width(116), GUILayout.Height(24));
             GUILayout.Space(8);
 
             if (GUILayout.Button("▶ " + AgentLocalization.Get("btn_detect_service", "启动 / 检测"), ModernUI.PrimaryButton, GUILayout.Width(128), GUILayout.Height(28)))
@@ -467,6 +472,14 @@ namespace AIBridge.Agent
 
             GUILayout.Space(6);
 
+            if (_hasStateRecoveryFailure)
+            {
+                EditorGUILayout.HelpBox(
+                    "Agent 状态恢复失败，系统已保留原状态文件并停止高频重试。\n" + PureCSharpAgent.StateRecoveryError,
+                    MessageType.Error);
+                GUILayout.Space(6);
+            }
+
             EditorGUILayout.BeginVertical(ModernUI.ChatViewport, GUILayout.ExpandHeight(true));
             _chatScroll = EditorGUILayout.BeginScrollView(_chatScroll, GUILayout.ExpandHeight(true));
             if (_messages.Count == 0)
@@ -657,7 +670,7 @@ namespace AIBridge.Agent
             GUILayout.Space(8);
 
             EditorGUILayout.BeginVertical(GUILayout.Width(110));
-            GUI.enabled = !_isWaiting && !string.IsNullOrEmpty((_inputText ?? "").Trim());
+            GUI.enabled = !_isWaiting && !_hasStateRecoveryFailure && !string.IsNullOrEmpty((_inputText ?? "").Trim());
             if (GUILayout.Button(_isWaiting ? AgentLocalization.Get("status_waiting", "等待中") : "✈ " + AgentLocalization.Get("btn_send", "发送"), ModernUI.PrimaryButton, GUILayout.Height(32)))
             {
                 string text = _inputText.Trim();
@@ -1204,6 +1217,7 @@ namespace AIBridge.Agent
             _activeSessionId = state == null ? null : state.sessionId;
             _agentStepCount = state == null ? 0 : state.step;
             _agentStepStatus = state == null ? null : state.status;
+            _hasStateRecoveryFailure = PureCSharpAgent.HasStateRecoveryFailure;
         }
 
         private void StopPendingSession()

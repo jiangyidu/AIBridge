@@ -4,6 +4,10 @@
 
 Check Unity Console first, then inspect `Library/AIBridge/agent-state.json` and `compile-state.json`. `FailedConflict` means another operation changed the source during the transaction; compare it with the backup manually and do not force an overwrite.
 
+If the Console reports `Can't assign value '0' (type System.Int32) to type System.Int64`, an older build failed to deserialize the Agent state after Domain Reload. Update the package. The state loader now accepts small JSON integers for `Int64` fields and resumes the completed compile transaction without deleting `Library/AIBridge`.
+
+If the state is genuinely corrupt, AI Assistant displays a state-recovery error, preserves the source files, and retries every five seconds. Do not start a replacement session or delete an active transaction. Back up `Library/AIBridge`, then inspect `agent-state.json` and its `.bak` file.
+
 ## Generated source failed to compile
 
 The transaction preserves the original errors, restores the prior source, and waits for recovery compilation. Do not delete the transaction file while rollback is active. `FailedRollback` means the original project still fails, the backup is unavailable, or recovery timed out.
