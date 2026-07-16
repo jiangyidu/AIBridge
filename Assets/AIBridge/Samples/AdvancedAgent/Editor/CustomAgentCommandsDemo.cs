@@ -57,7 +57,11 @@ namespace AIBridge.Agent
             }
 
             int count = 0;
+#if UNITY_2023_1_OR_NEWER
+            Renderer[] renderers = Object.FindObjectsByType<Renderer>(FindObjectsSortMode.None);
+#else
             Renderer[] renderers = Object.FindObjectsOfType<Renderer>();
+#endif
             foreach (Renderer renderer in renderers)
             {
                 if (renderer.gameObject.name.StartsWith(prefix))

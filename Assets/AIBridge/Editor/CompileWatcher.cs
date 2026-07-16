@@ -25,6 +25,7 @@ namespace AIBridge.Agent
         {
             LastErrors = new List<CompilerMessage>();
             LastCompileSucceeded = true;
+            if (AgentEditorEnvironment.IsAssetImportWorker) return;
             // Unity 2018.4 只有 assembly 级事件。完整周期通过“首个开始 + isCompiling 结束”收口。
 #pragma warning disable 0618 // 2023 标记过时，但 Unity 2018.4 必须使用该事件。
             CompilationPipeline.assemblyCompilationStarted -= OnAssemblyCompilationStarted;

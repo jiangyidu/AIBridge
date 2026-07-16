@@ -32,6 +32,7 @@ namespace AIBridge.Agent
 
         static CompileTransactionManager()
         {
+            if (AgentEditorEnvironment.IsAssetImportWorker) return;
             EditorApplication.update -= Tick;
             EditorApplication.update += Tick;
         }

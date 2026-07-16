@@ -18,8 +18,8 @@ No Python runtime, package installer, proxy process, listening port, or bundled 
 
 1. Import the `.unitypackage`, or copy `Assets/AIBridge` into a Unity 2018.4+ project.
 2. Wait for script compilation.
-3. Run `AIBridge > Environment Setup Wizard`.
-4. Open `AIBridge > AI Assistant` and configure the model endpoint and API key.
+3. Open `Tools > AIBridge > AI Assistant` and configure the model endpoint and API key.
+4. Optionally click `Environment Check` in the assistant window before the first task to verify the tool definitions and `Library/AIBridge` write access.
 
 Ollama mode assumes the user has chosen to run Ollama as the model endpoint; it is not an internal AI Bridge dependency.
 

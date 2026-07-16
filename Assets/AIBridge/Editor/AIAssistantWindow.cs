@@ -13,7 +13,7 @@ namespace AIBridge.Agent
     /// 纯 C# 版本：UI 只负责配置与展示；可恢复 Agent 状态机独立于窗口运行，
     /// 并将续跑状态持久化到 Library/AIBridge。
     /// </summary>
-    public partial class AIAssistantWindow : EditorWindow
+    public class AIAssistantWindow : EditorWindow
     {
         private enum LLMMode { RemoteAPI = 0, Ollama = 1 }
         private enum APIProvider
@@ -90,6 +90,7 @@ namespace AIBridge.Agent
         private List<ChatMessage> _messages = new List<ChatMessage>();
         private string _inputText = "";
         private Vector2 _chatScroll;
+        private bool _lockChatScroll;
         private Vector2 _cmdScroll;
         private bool _showConfig = true;
         private bool _showCmdPanel = true;
@@ -106,6 +107,7 @@ namespace AIBridge.Agent
         private string _selectedCmdKey = null;
         private string _cmdSearchText = "";
         private string _cmdCategoryFilter = "All";
+        private string[] _cmdCategories = new[] { "All" };
 
         private static string ProjectPath
         {
@@ -117,7 +119,7 @@ namespace AIBridge.Agent
             get { return AgentStateStore.HistoryPath; }
         }
 
-        [MenuItem("AIBridge/AI Assistant")]
+        [MenuItem("Tools/AIBridge/AI Assistant")]
         public static void ShowWindow()
         {
             var win = GetWindow<AIAssistantWindow>("AI Assistant");
@@ -128,6 +130,7 @@ namespace AIBridge.Agent
         private void OnEnable()
         {
             AgentToolDefinitions.Init(Application.dataPath);
+            RefreshCommandCategories();
             LoadPrefs();
             LoadHistory();
             SyncAgentState();
@@ -183,28 +186,31 @@ namespace AIBridge.Agent
             EditorGUILayout.BeginHorizontal(GUILayout.Height(34));
             EditorGUILayout.BeginVertical(GUILayout.Width(300));
             GUILayout.Label(AgentLocalization.Get("window_title", "AI Assistant"), ModernUI.WindowTitle);
-            GUILayout.Label("Pure C# Agent · Domain Reload Resilient", ModernUI.WindowSubtitle);
+            GUILayout.Label(AgentLocalization.Get("window_subtitle", "Unity 编辑器内 AI 桥接"), ModernUI.WindowSubtitle);
             EditorGUILayout.EndVertical();
 
             GUILayout.FlexibleSpace();
             string statusStr = _hasStateRecoveryFailure
-                ? "● 状态恢复失败"
+                ? AgentLocalization.Get("status_recovery_failed", "状态恢复失败")
                 : (_isWaiting
-                    ? "● " + AgentLocalization.Get("status_running", "Running")
-                    : "● " + AgentLocalization.Get("status_ready", "Ready"));
-            GUILayout.Label(statusStr,
-                (_isWaiting || _hasStateRecoveryFailure) ? ModernUI.StatusRunning : ModernUI.StatusOnline,
+                    ? AgentLocalization.Get("status_running", "Running")
+                    : AgentLocalization.Get("status_idle", "Idle"));
+            GUIStyle statusStyle = _hasStateRecoveryFailure
+                ? ModernUI.StatusError
+                : (_isWaiting ? ModernUI.StatusRunning : ModernUI.StatusOnline);
+            GUILayout.Label(statusStr, statusStyle,
                 GUILayout.Width(116), GUILayout.Height(24));
             GUILayout.Space(8);
 
-            if (GUILayout.Button("▶ " + AgentLocalization.Get("btn_detect_service", "启动 / 检测"), ModernUI.PrimaryButton, GUILayout.Width(128), GUILayout.Height(28)))
+            if (GUILayout.Button(AgentLocalization.Get("btn_environment_check", "环境检查"), ModernUI.SecondaryButton, GUILayout.Width(96), GUILayout.Height(28)))
             {
-                DetectCSharpAgentRuntimeAndReport();
+                CheckEnvironmentAndReport();
             }
             EditorGUILayout.EndHorizontal();
 
             EditorGUILayout.BeginHorizontal(GUILayout.Height(34));
             GUILayout.Label(AgentLocalization.Get("mode_label", "模式"), ModernUI.ToolbarLabel, GUILayout.Width(48));
+            EditorGUI.BeginDisabledGroup(_isWaiting);
             if (DrawTab(AgentLocalization.Get("mode_remote", "远程 API"), _mode == LLMMode.RemoteAPI, 92))
             {
                 _mode = LLMMode.RemoteAPI;
@@ -215,13 +221,19 @@ namespace AIBridge.Agent
                 _mode = LLMMode.Ollama;
                 SavePrefs();
             }
-            GUILayout.Label(AgentLocalization.Get("agent_badge_csharp", "Agent: C#"), ModernUI.AgentBadge, GUILayout.Width(116), GUILayout.Height(28));
-
+            EditorGUI.EndDisabledGroup();
             GUILayout.FlexibleSpace();
 
+            bool oldShowConfig = _showConfig;
+            bool oldShowCmdPanel = _showCmdPanel;
             _showConfig = GUILayout.Toggle(_showConfig, AgentLocalization.Get("toggle_config", "配置"), ModernUI.ToolbarToggle, GUILayout.Width(64), GUILayout.Height(26));
             _showCmdPanel = GUILayout.Toggle(_showCmdPanel, AgentLocalization.Get("toggle_commands", "命令"), ModernUI.ToolbarToggle, GUILayout.Width(64), GUILayout.Height(26));
+            if (oldShowConfig != _showConfig || oldShowCmdPanel != _showCmdPanel)
+            {
+                SavePrefs();
+            }
 
+            EditorGUI.BeginDisabledGroup(_isWaiting);
             if (GUILayout.Button(AgentLocalization.Get("btn_clear_history", "清空历史"), ModernUI.SecondaryButton, GUILayout.Width(82), GUILayout.Height(26)))
             {
                 if (EditorUtility.DisplayDialog(
@@ -234,14 +246,7 @@ namespace AIBridge.Agent
                     SaveHistory();
                 }
             }
-
-            if (_isWaiting)
-            {
-                if (GUILayout.Button(AgentLocalization.Get("btn_stop", "停止"), ModernUI.DangerButton, GUILayout.Width(64), GUILayout.Height(26)))
-                {
-                    StopPendingSession();
-                }
-            }
+            EditorGUI.EndDisabledGroup();
 
             string langBtnLabel = AgentLocalization.CurrentLanguage == "zh" ? "EN" : "中";
             if (GUILayout.Button(langBtnLabel, ModernUI.SecondaryButton, GUILayout.Width(42), GUILayout.Height(26)))
@@ -249,7 +254,6 @@ namespace AIBridge.Agent
                 AgentLocalization.CurrentLanguage = AgentLocalization.CurrentLanguage == "zh" ? "en" : "zh";
                 AgentLocalization.LoadTranslations();
                 foreach (var win in Resources.FindObjectsOfTypeAll<AIAssistantWindow>()) win.Repaint();
-                foreach (var win in Resources.FindObjectsOfTypeAll<AIBridgeSetupWizard>()) win.Repaint();
             }
 
             EditorGUILayout.EndHorizontal();
@@ -262,45 +266,23 @@ namespace AIBridge.Agent
             return clicked;
         }
 
-        private void DetectCSharpAgentRuntimeAndReport()
+        private void CheckEnvironmentAndReport()
         {
-            AddMessage("system", AgentLocalization.Get("msg_detecting_csharp", "正在检测进程内 C# Agent、工具定义与持久化目录..."));
-            SaveHistory();
-
-            bool runtimeOk = false;
-            string detail = "";
-            try
-            {
-                AgentToolDefinitions.Init(Application.dataPath);
-                string toolsJson = AgentToolDefinitions.GetToolsJson();
-                if (string.IsNullOrEmpty(toolsJson)) throw new InvalidOperationException("工具定义为空");
-                if (!Directory.Exists(AgentStateStore.StateDirectory))
-                    Directory.CreateDirectory(AgentStateStore.StateDirectory);
-                runtimeOk = AgentBridge.EnsureServerRunning();
-                detail = "C# Runtime: In-process\nState: " + AgentStateStore.StateDirectory +
-                         "\nDomain: " + AgentDomainIdentity.Current;
-            }
-            catch (Exception ex)
-            {
-                detail = ex.Message;
-            }
-
-            if (!runtimeOk)
-            {
-                AddMessage("assistant", "C# Agent 运行时检测失败：" + detail);
-                SaveHistory();
-                Repaint();
-                return;
-            }
-
-            AddMessage("system", "检测完成：纯 C# Agent 与 Unity 命令执行端可用。\n" + detail);
+            AgentEnvironmentCheckResult result = AgentEnvironmentValidator.Validate();
+            string title = AgentLocalization.Get("dialog_environment_check_title", "环境检查");
+            string message = result.Success
+                ? AgentLocalization.GetFormat("environment_check_success",
+                    result.UnityVersion,
+                    result.StateDirectory,
+                    result.Domain,
+                    result.HasActiveSession
+                        ? AgentLocalization.Get("value_yes", "是")
+                        : AgentLocalization.Get("value_no", "否"))
+                : AgentLocalization.GetFormat("environment_check_failed", result.Error);
             EditorUtility.DisplayDialog(
-                AgentLocalization.Get("dialog_detect_title", "启动 / 检测"),
-                "检测成功：无需 Python、pip、本地代理进程或端口。\n\n" + detail,
+                title,
+                message,
                 AgentLocalization.Get("dialog_ok", "确定"));
-
-            SaveHistory();
-            Repaint();
         }
 
         private void DrawChatPanel()
@@ -322,14 +304,15 @@ namespace AIBridge.Agent
             EditorGUILayout.BeginVertical(ModernUI.Card, GUILayout.ExpandWidth(true));
 
             EditorGUILayout.BeginHorizontal();
-            string configTitle = AgentLocalization.Get("config_title_csharp", "C# 智能体配置");
-            string configSubtitle = AgentLocalization.Get("config_subtitle_csharp", "（Unity 进程内直连 LLM，状态可跨脚本重载恢复）");
+            string configTitle = AgentLocalization.Get("config_title", "模型与执行设置");
+            string configSubtitle = AgentLocalization.Get("config_subtitle", "连接、模型与执行权限");
             GUILayout.Label(configTitle, ModernUI.CardTitle, GUILayout.Width(140));
             GUILayout.Label(configSubtitle, ModernUI.CardSubtitle);
             GUILayout.FlexibleSpace();
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(10);
+            EditorGUI.BeginDisabledGroup(_isWaiting);
 
             if (_mode == LLMMode.RemoteAPI)
             {
@@ -369,7 +352,7 @@ namespace AIBridge.Agent
                         MessageType.Error);
                 }
                 DrawMaxStepRow();
-                DrawServiceRow();
+                DrawExecutionPermissionRow();
                 EditorGUILayout.EndVertical();
                 EditorGUILayout.EndHorizontal();
             }
@@ -383,14 +366,15 @@ namespace AIBridge.Agent
                 GUILayout.Space(16);
                 EditorGUILayout.BeginVertical(GUILayout.ExpandWidth(true));
                 DrawMaxStepRow();
-                DrawServiceRow();
+                DrawExecutionPermissionRow();
                 EditorGUILayout.EndVertical();
                 EditorGUILayout.EndHorizontal();
             }
 
             GUILayout.Space(8);
-            GUILayout.Label("▾ " + AgentLocalization.Get("config_system_prompt_label", "额外系统提示词"), ModernUI.SectionTitle);
+            GUILayout.Label(AgentLocalization.Get("config_system_prompt_label", "额外系统提示词"), ModernUI.SectionTitle);
             _userSystemPrompt = EditorGUILayout.TextArea(_userSystemPrompt, ModernUI.TextArea, GUILayout.MinHeight(54), GUILayout.ExpandWidth(true));
+            EditorGUI.EndDisabledGroup();
 
             EditorGUILayout.EndVertical();
         }
@@ -431,13 +415,8 @@ namespace AIBridge.Agent
             EditorGUILayout.EndHorizontal();
         }
 
-        private void DrawServiceRow()
+        private void DrawExecutionPermissionRow()
         {
-            EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
-            GUILayout.Label(AgentLocalization.Get("config_csharp_runtime", "C# 运行时"), ModernUI.FieldLabel, GUILayout.Width(92));
-            EditorGUILayout.SelectableLabel("In-process · Reload Resilient", ModernUI.MiniValue, GUILayout.Height(22), GUILayout.ExpandWidth(true));
-            EditorGUILayout.EndHorizontal();
-
             EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
             GUILayout.Label(AgentLocalization.Get("config_execute_generated", "执行生成代码"), ModernUI.FieldLabel, GUILayout.Width(92));
             bool next = EditorGUILayout.ToggleLeft(
@@ -461,6 +440,17 @@ namespace AIBridge.Agent
             string sessionText = string.IsNullOrEmpty(_activeSessionId) ? "Session: -" : "Session: " + _activeSessionId;
             GUILayout.Label(sessionText, ModernUI.CardSubtitle, GUILayout.MinWidth(260));
             GUILayout.FlexibleSpace();
+            bool oldLockChatScroll = _lockChatScroll;
+            GUIContent lockScrollContent = new GUIContent(
+                AgentLocalization.Get("toggle_lock_chat_scroll", "锁定滚动"),
+                AgentLocalization.Get("toggle_lock_chat_scroll_hint", "勾选后保留手动滚动位置；取消勾选后自动跟随最新内容"));
+            _lockChatScroll = GUILayout.Toggle(_lockChatScroll, lockScrollContent, ModernUI.Toggle, GUILayout.Width(110));
+            if (oldLockChatScroll != _lockChatScroll)
+            {
+                if (!_lockChatScroll) _chatScroll.y = float.MaxValue;
+                SavePrefs();
+                Repaint();
+            }
             bool oldShowReasoning = _showReasoning;
             _showReasoning = GUILayout.Toggle(_showReasoning, AgentLocalization.Get("toggle_show_reasoning", "显示思考过程"), ModernUI.Toggle, GUILayout.Width(150));
             if (oldShowReasoning != _showReasoning)
@@ -481,6 +471,7 @@ namespace AIBridge.Agent
             }
 
             EditorGUILayout.BeginVertical(ModernUI.ChatViewport, GUILayout.ExpandHeight(true));
+            if (!_lockChatScroll) _chatScroll.y = float.MaxValue;
             _chatScroll = EditorGUILayout.BeginScrollView(_chatScroll, GUILayout.ExpandHeight(true));
             if (_messages.Count == 0)
             {
@@ -505,10 +496,9 @@ namespace AIBridge.Agent
                 GUILayout.Space(4);
             }
             EditorGUILayout.EndScrollView();
+            if (!_lockChatScroll) _chatScroll.y = float.MaxValue;
             EditorGUILayout.EndVertical();
 
-            // GUILayout.Space(8);
-            // DrawPromptTemplates();
             GUILayout.Space(4);
             DrawInputArea();
             EditorGUILayout.EndVertical();
@@ -559,6 +549,63 @@ namespace AIBridge.Agent
             return blocks;
         }
 
+        private static string SanitizeDisplayText(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text ?? "";
+            StringBuilder builder = null;
+            int segmentStart = 0;
+
+            for (int i = 0; i < text.Length; i++)
+            {
+                char current = text[i];
+                int consumed = 1;
+                string replacement = null;
+
+                switch (current)
+                {
+                    case '\uFE0F': replacement = ""; break;
+                    case '\u2705':
+                    case '\u2714':
+                    case '\u2713': replacement = "[OK]"; break;
+                    case '\u274C': replacement = "[错误]"; break;
+                    case '\u26A0': replacement = "[警告]"; break;
+                    case '\u26AA': replacement = "o"; break;
+                    case '\u23F9': replacement = "[停止]"; break;
+                    case '\u2192': replacement = "->"; break;
+                    case '\u25B6':
+                    case '\u25C0':
+                    case '\u25BC':
+                    case '\u25CF':
+                    case '\u2708':
+                    case '\u25A0':
+                    case '\u2756': replacement = ""; break;
+                    default:
+                        if (char.IsHighSurrogate(current) && i + 1 < text.Length && char.IsLowSurrogate(text[i + 1]))
+                        {
+                            int codePoint = char.ConvertToUtf32(current, text[i + 1]);
+                            if (codePoint >= 0x1F000 && codePoint <= 0x1FAFF)
+                            {
+                                consumed = 2;
+                                replacement = codePoint == 0x1F916 ? "[AI]" :
+                                    (codePoint == 0x1F527 ? "[工具]" : "");
+                            }
+                        }
+                        break;
+                }
+
+                if (replacement == null) continue;
+                if (builder == null) builder = new StringBuilder(text.Length + 16);
+                if (i > segmentStart) builder.Append(text, segmentStart, i - segmentStart);
+                builder.Append(replacement);
+                i += consumed - 1;
+                segmentStart = i + 1;
+            }
+
+            if (builder == null) return text;
+            if (segmentStart < text.Length) builder.Append(text, segmentStart, text.Length - segmentStart);
+            return builder.ToString();
+        }
+
         private void DrawChatBubble(ChatMessage msg)
         {
             bool isUser = msg.role == "user";
@@ -591,12 +638,14 @@ namespace AIBridge.Agent
             foreach (var block in blocks)
             {
                 if (string.IsNullOrEmpty(block.content)) continue;
+                string displayContent = SanitizeDisplayText(block.content);
+                if (string.IsNullOrEmpty(displayContent)) continue;
 
                 if (block.isCode)
                 {
                     EditorGUILayout.BeginHorizontal();
                     string headerLabel = string.IsNullOrEmpty(block.language) ? "CODE" : block.language.ToUpper();
-                    GUILayout.Label($" ❖ {headerLabel}", ModernUI.CodeBlockHeader);
+                    GUILayout.Label(headerLabel, ModernUI.CodeBlockHeader);
                     GUILayout.FlexibleSpace();
                     if (GUILayout.Button(AgentLocalization.Get("btn_copy", "复制"), ModernUI.CopyButton, GUILayout.Width(42), GUILayout.Height(18)))
                     {
@@ -605,19 +654,19 @@ namespace AIBridge.Agent
                     EditorGUILayout.EndHorizontal();
                     GUILayout.Space(2);
 
-                    float codeHeight = ModernUI.CodeBlockText.CalcHeight(new GUIContent(block.content), width - 36f);
+                    float codeHeight = ModernUI.CodeBlockText.CalcHeight(new GUIContent(displayContent), width - 36f);
                     codeHeight += 16f;
 
                     EditorGUILayout.BeginVertical(ModernUI.CodeBlockBg);
-                    EditorGUILayout.SelectableLabel(block.content, ModernUI.CodeBlockText, GUILayout.Height(codeHeight), GUILayout.ExpandWidth(true));
+                    EditorGUILayout.SelectableLabel(displayContent, ModernUI.CodeBlockText, GUILayout.Height(codeHeight), GUILayout.ExpandWidth(true));
                     EditorGUILayout.EndVertical();
                     GUILayout.Space(6);
                 }
                 else
                 {
-                    float textHeight = bodyStyle.CalcHeight(new GUIContent(block.content), width - 28f);
+                    float textHeight = bodyStyle.CalcHeight(new GUIContent(displayContent), width - 28f);
                     textHeight += 12f;
-                    EditorGUILayout.SelectableLabel(block.content, bodyStyle, GUILayout.Height(textHeight), GUILayout.ExpandWidth(true));
+                    EditorGUILayout.SelectableLabel(displayContent, bodyStyle, GUILayout.Height(textHeight), GUILayout.ExpandWidth(true));
                     GUILayout.Space(4);
                 }
             }
@@ -641,27 +690,6 @@ namespace AIBridge.Agent
             GUILayout.Space(7);
         }
 
-        //快捷方法，可以暂时留着
-        private void DrawPromptTemplates()
-        {
-            EditorGUILayout.BeginHorizontal();
-            GUILayout.Label(AgentLocalization.Get("templates_title", "快捷指令:"), ModernUI.MiniValue, GUILayout.Width(58), GUILayout.Height(20));
-            DrawPromptTemplateButton("📦 " + AgentLocalization.Get("template_create_cube", "创建立方体"), "在原点创建一个红色立方体");
-            DrawPromptTemplateButton("🔍 " + AgentLocalization.Get("template_check_hierarchy", "检查层级"), "检查当前场景的层级结构，告诉我有什么物体");
-            DrawPromptTemplateButton("🧹 " + AgentLocalization.Get("template_clean_scene", "清理场景"), "清理场景中临时生成的所有多余物体");
-            DrawPromptTemplateButton("📜 " + AgentLocalization.Get("template_create_script", "生成脚本"), "生成一个控制物体旋转的 MonoBehaviour 脚本并挂载到选中的物体上");
-            EditorGUILayout.EndHorizontal();
-        }
-
-        private void DrawPromptTemplateButton(string label, string promptText)
-        {
-            if (GUILayout.Button(label, ModernUI.SecondaryButton, GUILayout.Height(20)))
-            {
-                _inputText = promptText;
-                GUI.FocusControl("AIAssistantInput");
-            }
-        }
-
         private void DrawInputArea()
         {
             EditorGUILayout.BeginHorizontal(ModernUI.Composer, GUILayout.Height(82));
@@ -669,24 +697,28 @@ namespace AIBridge.Agent
             _inputText = EditorGUILayout.TextArea(_inputText, ModernUI.InputArea, GUILayout.MinHeight(68), GUILayout.ExpandWidth(true));
             GUILayout.Space(8);
 
-            EditorGUILayout.BeginVertical(GUILayout.Width(110));
-            GUI.enabled = !_isWaiting && !_hasStateRecoveryFailure && !string.IsNullOrEmpty((_inputText ?? "").Trim());
-            if (GUILayout.Button(_isWaiting ? AgentLocalization.Get("status_waiting", "等待中") : "✈ " + AgentLocalization.Get("btn_send", "发送"), ModernUI.PrimaryButton, GUILayout.Height(32)))
+            EditorGUILayout.BeginVertical(GUILayout.Width(96));
+            GUILayout.FlexibleSpace();
+            if (_isWaiting)
             {
-                string text = _inputText.Trim();
-                _inputText = "";
-                GUI.FocusControl(null);
-                SendUserMessage(text);
+                if (GUILayout.Button(AgentLocalization.Get("btn_stop", "终止"), ModernUI.DangerButton, GUILayout.Height(34)))
+                {
+                    StopPendingSession();
+                }
+            }
+            else
+            {
+                GUI.enabled = !_hasStateRecoveryFailure && !string.IsNullOrEmpty((_inputText ?? "").Trim());
+                if (GUILayout.Button(AgentLocalization.Get("btn_send", "发送"), ModernUI.PrimaryButton, GUILayout.Height(34)))
+                {
+                    string text = _inputText.Trim();
+                    _inputText = "";
+                    GUI.FocusControl(null);
+                    SendUserMessage(text);
+                }
             }
             GUI.enabled = true;
-
-            GUILayout.Space(6);
-            GUI.enabled = _isWaiting;
-            if (GUILayout.Button("■ " + AgentLocalization.Get("btn_stop", "停止"), ModernUI.DangerButton, GUILayout.Height(30)))
-            {
-                StopPendingSession();
-            }
-            GUI.enabled = true;
+            GUILayout.FlexibleSpace();
             EditorGUILayout.EndVertical();
             EditorGUILayout.EndHorizontal();
         }
@@ -707,33 +739,38 @@ namespace AIBridge.Agent
                 ModernUI.SecondaryButton, GUILayout.Width(58), GUILayout.Height(26)))
             {
                 AgentCommandRegistry.Scan();
-                AddMessage("system", AgentLocalization.Get("msg_commands_refreshed", "已刷新 Unity 执行命令列表。"));
-                SaveHistory();
+                RefreshCommandCategories();
+                ShowNotification(new GUIContent(AgentLocalization.Get("msg_commands_refreshed", "已刷新 Unity 执行命令列表。")));
                 Repaint();
             }
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(10);
-            _cmdSearchText = EditorGUILayout.TextField(_cmdSearchText, ModernUI.SearchField, GUILayout.Height(28));
-
-            GUILayout.Space(8);
             EditorGUILayout.BeginHorizontal();
-            DrawCategoryChip("All", 54);
-            DrawCategoryChip("Scene", 58);
-            DrawCategoryChip("Json", 52);
-            DrawCategoryChip("Utility", 66);
-            GUILayout.FlexibleSpace();
+            _cmdSearchText = EditorGUILayout.TextField(_cmdSearchText, ModernUI.SearchField, GUILayout.Height(28), GUILayout.ExpandWidth(true));
+            GUILayout.Space(6);
+            int categoryIndex = Array.IndexOf(_cmdCategories, _cmdCategoryFilter);
+            if (categoryIndex < 0) categoryIndex = 0;
+            string[] categoryLabels = GetLocalizedCommandCategories();
+            int nextCategoryIndex = EditorGUILayout.Popup(categoryIndex, categoryLabels, ModernUI.Popup, GUILayout.Width(104), GUILayout.Height(24));
+            _cmdCategoryFilter = _cmdCategories[Mathf.Clamp(nextCategoryIndex, 0, _cmdCategories.Length - 1)];
             EditorGUILayout.EndHorizontal();
 
             GUILayout.Space(8);
             EditorGUILayout.BeginVertical(ModernUI.CommandViewport, GUILayout.ExpandHeight(true));
             _cmdScroll = EditorGUILayout.BeginScrollView(_cmdScroll, GUILayout.ExpandHeight(true));
             var cmds = AgentCommandRegistry.Commands;
+            int visibleCommandCount = 0;
             foreach (var kv in cmds)
             {
                 AgentCommandInfo info = kv.Value;
                 if (!CommandMatchesSearch(info)) continue;
+                visibleCommandCount++;
                 DrawCommandRow(kv.Key, info);
+            }
+            if (visibleCommandCount == 0)
+            {
+                GUILayout.Label(AgentLocalization.Get("cmd_no_matches", "没有匹配的命令"), ModernUI.EmptyHint, GUILayout.ExpandHeight(true));
             }
             EditorGUILayout.EndScrollView();
             EditorGUILayout.EndVertical();
@@ -741,47 +778,72 @@ namespace AIBridge.Agent
             EditorGUILayout.EndVertical();
         }
 
-        private void DrawCategoryChip(string category, float width)
+        private void RefreshCommandCategories()
         {
-            bool active = _cmdCategoryFilter == category;
-            string displayCategory = category == "All" ? AgentLocalization.Get("category_all", "全部") : category;
-            if (GUILayout.Button(displayCategory, active ? ModernUI.FilterActive : ModernUI.FilterNormal, GUILayout.Width(width), GUILayout.Height(24)))
+            SortedSet<string> categories = new SortedSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (AgentCommandInfo info in AgentCommandRegistry.Commands.Values)
             {
-                _cmdCategoryFilter = category;
+                categories.Add(NormalizeCategory(info.Category));
             }
+
+            List<string> values = new List<string>(categories.Count + 1) { "All" };
+            values.AddRange(categories);
+            _cmdCategories = values.ToArray();
+            if (Array.IndexOf(_cmdCategories, _cmdCategoryFilter) < 0)
+                _cmdCategoryFilter = "All";
+            _selectedCmdKey = null;
+            _cmdArgs = new string[0];
+            _cmdArgValues = new string[0];
+        }
+
+        private string[] GetLocalizedCommandCategories()
+        {
+            string[] labels = new string[_cmdCategories.Length];
+            for (int i = 0; i < _cmdCategories.Length; i++)
+            {
+                labels[i] = _cmdCategories[i] == "All"
+                    ? AgentLocalization.Get("category_all", "全部")
+                    : _cmdCategories[i];
+            }
+            return labels;
         }
 
         private void DrawCommandRow(string key, AgentCommandInfo info)
         {
             bool selected = _selectedCmdKey == key;
             string category = NormalizeCategory(info.Category);
+            string[] args = info.ParameterNames ?? new string[0];
 
             EditorGUILayout.BeginVertical(selected ? ModernUI.CommandRowSelected : ModernUI.CommandRow, GUILayout.MinHeight(34));
             EditorGUILayout.BeginHorizontal(GUILayout.Height(28));
 
-            if (GUILayout.Button(info.MethodName, ModernUI.CommandNameButton, GUILayout.ExpandWidth(true), GUILayout.Height(24)))
-            {
-                _selectedCmdKey = selected ? null : key;
-                _cmdArgs = info.ParameterNames ?? new string[0];
-                _cmdArgValues = new string[_cmdArgs.Length];
-            }
+            string tooltip = string.IsNullOrEmpty(info.Description)
+                ? info.ClassName
+                : info.ClassName + "\n" + info.Description;
+            GUILayout.Label(new GUIContent(info.MethodName, tooltip), ModernUI.CommandNameButton, GUILayout.ExpandWidth(true), GUILayout.Height(24));
 
-            GUILayout.Label(category, ModernUI.CommandTag, GUILayout.Width(58), GUILayout.Height(20));
+            GUILayout.Label(new GUIContent(category, category), ModernUI.CommandTag, GUILayout.Width(72), GUILayout.Height(20));
 
-            if (GUILayout.Button("▶", ModernUI.SmallRunButton, GUILayout.Width(32), GUILayout.Height(22)))
+            string actionLabel = args.Length == 0
+                ? AgentLocalization.Get("btn_execute", "执行")
+                : (selected
+                    ? AgentLocalization.Get("btn_collapse", "收起")
+                    : AgentLocalization.Get("btn_parameters", "参数"));
+            EditorGUI.BeginDisabledGroup(_isWaiting && args.Length == 0);
+            if (GUILayout.Button(actionLabel, ModernUI.SmallRunButton, GUILayout.Width(48), GUILayout.Height(22)))
             {
-                string[] args = info.ParameterNames ?? new string[0];
-                if (args.Length > 0 && !selected)
+                if (args.Length == 0)
                 {
-                    _selectedCmdKey = key;
-                    _cmdArgs = args;
-                    _cmdArgValues = new string[_cmdArgs.Length];
+                    ExecuteCommand(info, new string[0]);
                 }
                 else
                 {
-                    ExecuteCommand(info, selected ? _cmdArgValues : new string[0]);
+                    _selectedCmdKey = selected ? null : key;
+                    _cmdArgs = args;
+                    _cmdArgValues = new string[_cmdArgs.Length];
                 }
             }
+            EditorGUI.EndDisabledGroup();
             EditorGUILayout.EndHorizontal();
 
             if (selected)
@@ -794,16 +856,21 @@ namespace AIBridge.Agent
 
                 for (int i = 0; i < _cmdArgs.Length; i++)
                 {
-                    string label = _cmdArgs[i] + " (" + info.ParameterTypes[i] + ")";
+                    string parameterType = info.ParameterTypes != null && i < info.ParameterTypes.Length
+                        ? info.ParameterTypes[i]
+                        : "object";
+                    string label = _cmdArgs[i] + " (" + parameterType + ")";
                     _cmdArgValues[i] = DrawTextRow(label, _cmdArgValues[i] ?? "");
                 }
 
                 EditorGUILayout.BeginHorizontal();
                 GUILayout.FlexibleSpace();
-                if (GUILayout.Button(AgentLocalization.Get("btn_manual_exec", "手动执行"), ModernUI.PrimaryButton, GUILayout.Width(92), GUILayout.Height(26)))
+                EditorGUI.BeginDisabledGroup(_isWaiting);
+                if (GUILayout.Button(AgentLocalization.Get("btn_execute", "执行"), ModernUI.PrimaryButton, GUILayout.Width(72), GUILayout.Height(26)))
                 {
                     ExecuteCommand(info, _cmdArgValues);
                 }
+                EditorGUI.EndDisabledGroup();
                 EditorGUILayout.EndHorizontal();
             }
             EditorGUILayout.EndVertical();
@@ -841,7 +908,6 @@ namespace AIBridge.Agent
             public static GUIStyle WindowSubtitle;
             public static GUIStyle ToolbarLabel;
             public static GUIStyle ToolbarToggle;
-            public static GUIStyle AgentBadge;
             public static GUIStyle TabNormal;
             public static GUIStyle TabActive;
             public static GUIStyle Card;
@@ -852,14 +918,13 @@ namespace AIBridge.Agent
             public static GUIStyle TextField;
             public static GUIStyle Popup;
             public static GUIStyle TextArea;
-            public static GUIStyle MiniValue;
             public static GUIStyle NumberBadge;
             public static GUIStyle StatusOnline;
             public static GUIStyle StatusRunning;
+            public static GUIStyle StatusError;
             public static GUIStyle PrimaryButton;
             public static GUIStyle SecondaryButton;
             public static GUIStyle DangerButton;
-            public static GUIStyle IconButton;
             public static GUIStyle Toggle;
             public static GUIStyle ChatViewport;
             public static GUIStyle EmptyHint;
@@ -872,8 +937,6 @@ namespace AIBridge.Agent
             public static GUIStyle Composer;
             public static GUIStyle InputArea;
             public static GUIStyle SearchField;
-            public static GUIStyle FilterActive;
-            public static GUIStyle FilterNormal;
             public static GUIStyle CommandViewport;
             public static GUIStyle CommandRow;
             public static GUIStyle CommandRowSelected;
@@ -939,7 +1002,20 @@ namespace AIBridge.Agent
                 WindowSubtitle = Label(12, Muted, FontStyle.Normal);
                 ToolbarLabel = Label(12, Muted, FontStyle.Normal);
                 ToolbarToggle = Button(PanelLight, Text, FontStyle.Normal);
-                AgentBadge = Chip(isPro ? new Color(0.13f, 0.22f, 0.36f) : new Color(0.80f, 0.88f, 1.0f), isPro ? new Color(0.76f, 0.86f, 1.0f) : new Color(0.05f, 0.25f, 0.55f), FontStyle.Bold);
+                ToolbarToggle.onNormal.background = Tex(Blue);
+                ToolbarToggle.onNormal.textColor = Color.white;
+                ToolbarToggle.onHover.background = Tex(new Color(
+                    Mathf.Min(Blue.r + 0.05f, 1f),
+                    Mathf.Min(Blue.g + 0.05f, 1f),
+                    Mathf.Min(Blue.b + 0.05f, 1f),
+                    Blue.a));
+                ToolbarToggle.onHover.textColor = Color.white;
+                ToolbarToggle.onActive.background = Tex(new Color(
+                    Mathf.Max(Blue.r - 0.04f, 0f),
+                    Mathf.Max(Blue.g - 0.04f, 0f),
+                    Mathf.Max(Blue.b - 0.04f, 0f),
+                    Blue.a));
+                ToolbarToggle.onActive.textColor = Color.white;
                 TabNormal = Button(isPro ? new Color(0.125f, 0.14f, 0.165f) : new Color(0.85f, 0.85f, 0.85f), Muted, FontStyle.Normal);
                 TabActive = Button(isPro ? new Color(0.16f, 0.26f, 0.46f) : new Color(0.16f, 0.36f, 0.66f), Color.white, FontStyle.Bold);
                 Card = Box(Panel, new RectOffset(14, 14, 12, 12));
@@ -963,17 +1039,16 @@ namespace AIBridge.Agent
                     focused = { background = Tex(isPro ? new Color(0.10f, 0.12f, 0.15f) : new Color(0.90f, 0.92f, 0.95f)), textColor = isPro ? Color.white : Text },
                     padding = new RectOffset(8, 8, 7, 7)
                 };
-                MiniValue = Label(11, Muted, FontStyle.Normal);
                 NumberBadge = Label(12, Text, FontStyle.Bold);
                 NumberBadge.alignment = TextAnchor.MiddleCenter;
                 NumberBadge.normal.background = Tex(Input);
 
                 StatusOnline = Chip(Green, GreenText, FontStyle.Bold);
                 StatusRunning = Chip(Orange, OrangeText, FontStyle.Bold);
+                StatusError = Chip(Red, RedText, FontStyle.Bold);
                 PrimaryButton = Button(Blue, Color.white, FontStyle.Bold);
                 SecondaryButton = Button(PanelLight, Text, FontStyle.Normal);
                 DangerButton = Button(isPro ? Red : new Color(0.95f, 0.80f, 0.80f), isPro ? RedText : new Color(0.60f, 0.10f, 0.15f), FontStyle.Bold);
-                IconButton = Button(PanelLight, Text, FontStyle.Bold);
                 Toggle = new GUIStyle(EditorStyles.toggle)
                 {
                     fontSize = 12,
@@ -1002,8 +1077,6 @@ namespace AIBridge.Agent
                 InputArea = new GUIStyle(TextArea) { fontSize = 13 };
 
                 SearchField = TextInput(28);
-                FilterActive = Chip(Blue, Color.white, FontStyle.Bold);
-                FilterNormal = Chip(PanelLight, Text, FontStyle.Normal);
                 CommandViewport = Box(isPro ? new Color(0.082f, 0.095f, 0.115f) : new Color(0.90f, 0.90f, 0.90f), new RectOffset(6, 6, 6, 6));
                 CommandRow = Box(isPro ? new Color(0.135f, 0.155f, 0.185f) : new Color(0.95f, 0.95f, 0.95f), new RectOffset(6, 6, 5, 5));
                 CommandRowSelected = Box(isPro ? new Color(0.155f, 0.19f, 0.25f) : new Color(0.80f, 0.88f, 0.96f), new RectOffset(6, 6, 5, 7));
@@ -1141,7 +1214,7 @@ namespace AIBridge.Agent
             AddMessage("user", text);
             SaveHistory();
 
-            if (!AgentBridge.EnsureServerRunning())
+            if (!AgentBridge.EnsureInitialized())
             {
                 AddMessage("assistant", AgentLocalization.Get("err_bridge_not_running"));
                 SaveHistory();
@@ -1383,6 +1456,10 @@ namespace AIBridge.Agent
             {
                 _apiKeyNeedsReentry = true;
             }
+
+            EditorPrefs.SetBool("AIAss_LockChatScroll", _lockChatScroll);
+            EditorPrefs.SetBool("AIAss_ShowConfig", _showConfig);
+            EditorPrefs.SetBool("AIAss_ShowCommandPanel", _showCmdPanel);
         }
 
         private void LoadPrefs()
@@ -1398,6 +1475,9 @@ namespace AIBridge.Agent
             _maxSteps = settings.MaxSteps;
             _showReasoning = settings.ShowReasoning;
             _allowGeneratedCodeExecution = settings.AllowGeneratedCodeExecution;
+            _lockChatScroll = EditorPrefs.GetBool("AIAss_LockChatScroll", false);
+            _showConfig = EditorPrefs.GetBool("AIAss_ShowConfig", true);
+            _showCmdPanel = EditorPrefs.GetBool("AIAss_ShowCommandPanel", true);
 
             string storedKey = EditorPrefs.GetString("AIAss_Api_Key", "");
             bool shouldRewrite;

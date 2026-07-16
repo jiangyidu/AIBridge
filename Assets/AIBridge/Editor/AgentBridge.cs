@@ -1,9 +1,6 @@
 using System;
-using System.Collections.Concurrent;
-using System.IO;
 using System.Linq;
 using System.Reflection;
-using System.Text;
 using LitJson;
 using UnityEditor;
 using UnityEngine;
@@ -18,53 +15,17 @@ namespace AIBridge.Agent
     [InitializeOnLoad]
     public static class AgentBridge
     {
-        private static readonly ConcurrentQueue<Action> DispatchQueue = new ConcurrentQueue<Action>();
-
         static AgentBridge()
         {
+            if (AgentEditorEnvironment.IsAssetImportWorker) return;
             BridgeLog.SetLogger(new UnityBridgeLogger());
-            EnsureUserTemplateFilesExist();
-            AgentCommandRegistry.Invalidate();
             AgentCommandRegistry.Scan();
-            EnsureUpdateHooked();
-            AssemblyReloadEvents.afterAssemblyReload -= OnAfterAssemblyReload;
-            AssemblyReloadEvents.afterAssemblyReload += OnAfterAssemblyReload;
         }
 
-        private static void OnAfterAssemblyReload()
+        /// <summary>确认进程内 Unity 命令宿主已在主 Editor 进程初始化。</summary>
+        public static bool EnsureInitialized()
         {
-            AgentCommandRegistry.Invalidate();
-            AgentCommandRegistry.Scan();
-            EnsureUpdateHooked();
-        }
-
-        private static void EnsureUpdateHooked()
-        {
-            EditorApplication.update -= Update;
-            EditorApplication.update += Update;
-        }
-
-        private static void Update()
-        {
-            Action action;
-            int count = 0;
-            while (count++ < 100 && DispatchQueue.TryDequeue(out action))
-            {
-                try { if (action != null) action(); }
-                catch (Exception ex) { Debug.LogException(ex); }
-            }
-        }
-
-        /// <summary>兼容旧接口：纯 C# 模式无需服务器，执行宿主始终可用。</summary>
-        public static bool EnsureServerRunning() { EnsureUpdateHooked(); return true; }
-        public static bool IsServerRunning() { return true; }
-        public static int GetActivePort() { return 0; }
-        public static string GetAgentUrl() { return "in-process://aibridge"; }
-        public static void StopServer() { }
-
-        public static void EnqueueMainThread(Action action)
-        {
-            if (action != null) DispatchQueue.Enqueue(action);
+            return !AgentEditorEnvironment.IsAssetImportWorker;
         }
 
         /// <summary>解析 JSON 载荷，利用反射调用指定静态方法。</summary>
@@ -120,8 +81,10 @@ namespace AIBridge.Agent
 
         private static MethodInfo ResolveMethod(Type type, string methodName, int argCount)
         {
-            MethodInfo[] methods = type.GetMethods(BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.Static)
-                .Where(method => method.Name == methodName).ToArray();
+            MethodInfo[] methods = type.GetMethods(BindingFlags.Public | BindingFlags.Static)
+                .Where(method => method.Name == methodName &&
+                                 method.GetCustomAttribute<AgentCommandAttribute>() != null)
+                .ToArray();
             MethodInfo exact = methods.FirstOrDefault(method => method.GetParameters().Length == argCount);
             if (exact != null) return exact;
             return methods.FirstOrDefault(method => method.GetParameters().Length > argCount &&
@@ -217,88 +180,5 @@ namespace AIBridge.Agent
             return Convert.ChangeType(value, parameterType);
         }
 
-        private static void EnsureUserTemplateFilesExist()
-        {
-            try
-            {
-                string editorDirectory = Path.Combine(Application.dataPath, "Editor");
-                if (!Directory.Exists(editorDirectory)) Directory.CreateDirectory(editorDirectory);
-
-                string commandsPath = Path.Combine(editorDirectory, "AITempCommands.cs");
-                if (!File.Exists(commandsPath))
-                {
-                    string content =
-@"using UnityEngine;
-using UnityEditor;
-
-namespace AIBridge.Agent
-{
-    /// <summary>AI 临时命令容器。生成方法保存在 AITempCommandsGenerated 下的独立 partial 文件中。</summary>
-    public static partial class AITempCommands
-    {
-    }
-}";
-                    File.WriteAllText(commandsPath, content, Encoding.UTF8);
-                    AssetDatabase.ImportAsset("Assets/Editor/AITempCommands.cs");
-                }
-
-                string customPath = Path.Combine(editorDirectory, "AntigravityTasks.cs");
-                if (!File.Exists(customPath))
-                {
-                    string content =
-@"using UnityEngine;
-using UnityEditor;
-using AIBridge.Agent;
-
-namespace AIBridge.Agent
-{
-    /// <summary>用户自定义 AI 任务命令类。</summary>
-    public static class AntigravityTasks
-    {
-        // [AgentCommand(""示例命令"", category: ""Custom"")]
-        // public static string Example() { return ""ok""; }
-    }
-}";
-                    File.WriteAllText(customPath, content, Encoding.UTF8);
-                    AssetDatabase.ImportAsset("Assets/Editor/AntigravityTasks.cs");
-                }
-            }
-            catch (Exception ex)
-            {
-                Debug.LogWarning("[AgentBridge] 创建用户命令模板失败: " + ex.Message);
-            }
-        }
-
-        public static void ExecuteBatchTask()
-        {
-            try
-            {
-                string[] args = Environment.GetCommandLineArgs();
-                string commandFile = "";
-                string outputFile = "";
-                for (int i = 0; i < args.Length; i++)
-                {
-                    if (args[i] == "-agentCmdFile" && i + 1 < args.Length) commandFile = args[i + 1];
-                    if (args[i] == "-agentOutFile" && i + 1 < args.Length) outputFile = args[i + 1];
-                }
-                if (string.IsNullOrEmpty(commandFile) || string.IsNullOrEmpty(outputFile) || !File.Exists(commandFile))
-                    throw new Exception("Missing valid -agentCmdFile or -agentOutFile argument.");
-                File.WriteAllText(outputFile, ExecuteCommandJson(File.ReadAllText(commandFile)));
-                EditorApplication.Exit(0);
-            }
-            catch (Exception ex)
-            {
-                Debug.LogError("[AgentBridge] Batch execution failed: " + ex.Message);
-                EditorApplication.Exit(1);
-            }
-        }
-    }
-
-    public static class AgentTestAPI
-    {
-        public static string Hello(string name)
-        {
-            return "Unity 2018.4 says Hello to " + name;
-        }
     }
 }

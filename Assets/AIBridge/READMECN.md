@@ -19,8 +19,8 @@ AI Bridge 是一个兼容 Unity 2018.4+ 的 Editor-only 纯 C# 智能体插件�
 
 1. 在 Unity 2018.4 或更高版本中导入 `.unitypackage`，或把 `Assets/AIBridge` 复制到项目。
 2. 等待 Unity 完成编译。
-3. 打开 `AIBridge > Environment Setup Wizard`，检查工具定义和 `Library/AIBridge` 可写性。
-4. 打开 `AIBridge > AI Assistant`，配置模型、接口地址和 API Key。
+3. 打开 `Tools > AIBridge > AI Assistant`，配置模型、接口地址和 API Key。
+4. 首次执行任务前可在助手窗口点击“环境检查”，验证工具定义和 `Library/AIBridge` 写入权限。
 
 无需安装任何第三方运行时。Ollama 模式仍需要用户自己运行 Ollama，因为它本身就是所选的模型服务，而不是 AI Bridge 的内部依赖。
 
@@ -61,4 +61,11 @@ AI Bridge 是一个兼容 Unity 2018.4+ 的 Editor-only 纯 C# 智能体插件�
 4. 测试故意生成语法错误：记录原始错误、恢复源码、恢复编译、Agent 收到失败。
 5. 在等待 LLM 和执行普通工具的提交边界分别触发脚本重载，确认有限重试和不重放策略。
 
-详细流程见 `Documentation~/architectureCN.md`，故障处理见 `Documentation~/troubleshootingCN.md`。
+## 文档导航
+
+- [项目操作手册](Documentation/PROJECT_OPERATIONS_CN.md)：安装、配置、工具使用、生成代码、状态恢复、扩展和验证。
+- [架构与逻辑流程](Documentation/ARCHITECTURE_AND_FLOWS_CN.md)：组件职责、会话状态机、LLM/工具链路、编译事务、Domain Reload 和数据流。
+- [Asset Store 上架与发布清单](Documentation/ASSET_STORE_RELEASE_CN.md)：官方规则映射、当前差距、P0/P1 清单、测试矩阵和提交步骤。
+- [API 与扩展简要指南](Documentation~/api_guideCN.md) 与 [故障排查](Documentation~/troubleshootingCN.md)：面向开发者的快速参考。
+
+经典 `.unitypackage` 应把正常 `Documentation` 目录作为可离线读取的正式文档；`Documentation~` 中保留的是现有 UPM 风格简版参考，正式制包时需根据最终发行形态检查是否重复或遗漏。

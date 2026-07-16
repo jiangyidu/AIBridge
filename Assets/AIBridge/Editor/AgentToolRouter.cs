@@ -94,7 +94,6 @@ namespace AIBridge.Agent
                     case BridgeProtocol.TOOL_EXECUTE_COMMAND: return HandleExecuteCommand(argsJson);
                     case BridgeProtocol.TOOL_COMPILE_TEMP_METHOD: return HandleCompileTempMethod(argsJson);
                     case BridgeProtocol.TOOL_COMPILE_SCRIPT: return HandleCompileScript(argsJson);
-                    case BridgeProtocol.TOOL_CHECK_COMPILE_STATUS: return HandleCheckCompileStatus(argsJson);
                     case BridgeProtocol.TOOL_QUERY_SCENE: return Bridge.QueryScene();
                     case BridgeProtocol.TOOL_QUERY_OBJECT: return Bridge.QueryObject(AgentJson.GetString(AgentJson.ParseObject(argsJson), "objectName"));
                     case BridgeProtocol.TOOL_FIND_ASSETS: return Bridge.FindAssets(AgentJson.GetString(AgentJson.ParseObject(argsJson), "filter"));
@@ -277,14 +276,6 @@ namespace AIBridge.Agent
                 "type",
                 typeName,
                 typeName);
-        }
-
-        private static string HandleCheckCompileStatus(string argsJson)
-        {
-            JsonData args = AgentJson.ParseObject(argsJson);
-            string operationId = AgentJson.GetString(args, "operationId");
-            bool final;
-            return CompileTransactionManager.GetStatusJson(operationId, out final);
         }
 
         private static bool TryParseVector3(string s, out Vector3 vec)

@@ -16,6 +16,7 @@ namespace AIBridge.Agent
     {
         private const int MaxLlmAttempts = 3;
         private const double FailedSessionRetrySeconds = 5.0;
+        private static readonly long StaleResumeTicks = TimeSpan.FromMinutes(5).Ticks;
         private static AgentSessionState _state;
         private static AgentLlmOperation _llmOperation;
         private static string _inMemoryApiKey = "";
@@ -27,6 +28,7 @@ namespace AIBridge.Agent
 
         static PureCSharpAgent()
         {
+            if (AgentEditorEnvironment.IsAssetImportWorker) return;
             LoadSessionIntoMemory();
             EditorApplication.update -= Tick;
             EditorApplication.update += Tick;
@@ -173,6 +175,13 @@ namespace AIBridge.Agent
                 return;
             }
 
+            if (_state.updatedUtcTicks > 0 && DateTime.UtcNow.Ticks - _state.updatedUtcTicks > StaleResumeTicks)
+            {
+                StopStaleSession();
+                NotifyChanged();
+                return;
+            }
+
             ResumeLoadedActiveSession();
             NotifyChanged();
         }
@@ -216,6 +225,18 @@ namespace AIBridge.Agent
             {
                 CompleteUncertainPreparedTool();
             }
+        }
+
+        private static void StopStaleSession()
+        {
+            if (_state == null) return;
+            _state.active = false;
+            _state.cancelRequested = false;
+            _state.phase = AgentRunPhase.Cancelled;
+            _state.status = "Agent 会话在长时间中断后已安全停止";
+            _state.lastError = "会话状态超过 5 分钟未更新。为避免在未知项目状态下自动重放旧操作，请重新提交任务。";
+            SaveState();
+            AgentStateStore.AppendHistory("system", "[安全停止] " + _state.lastError, "");
         }
 
         private static void BeforeAssemblyReload()

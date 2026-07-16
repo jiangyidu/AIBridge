@@ -3,6 +3,10 @@
     "zh": "AI 助手",
     "en": "AI Assistant"
   },
+  "window_subtitle": {
+    "zh": "Unity 编辑器内 AI 桥接",
+    "en": "In-Editor AI Bridge"
+  },
   "mode_label": {
     "zh": "模式：",
     "en": "Mode: "
@@ -15,17 +19,17 @@
     "zh": "Ollama 本地",
     "en": "Ollama Local"
   },
-  "python_agent_label": {
-    "zh": "C# 智能体",
-    "en": "C# Agent"
-  },
   "status_running": {
     "zh": "运行中",
     "en": "Running"
   },
-  "status_ready": {
-    "zh": "就绪",
-    "en": "Ready"
+  "status_recovery_failed": {
+    "zh": "状态恢复失败",
+    "en": "Recovery Failed"
+  },
+  "status_idle": {
+    "zh": "空闲",
+    "en": "Idle"
   },
   "toggle_config": {
     "zh": "配置",
@@ -60,16 +64,8 @@
     "en": "Cancel"
   },
   "agent_executing": {
-    "zh": "🤖 智能体正在执行 {0}",
-    "en": "🤖 Agent is executing {0}"
-  },
-  "agent_processing": {
-    "zh": "🤖 C# 智能体正在处理请求...",
-    "en": "🤖 C# Agent is processing request..."
-  },
-  "config_title": {
-    "zh": "C# 智能体配置（Unity 进程内直连大语言模型）",
-    "en": "C# Agent Config (Unity calls the LLM in-process)"
+    "zh": "智能体正在执行 {0}",
+    "en": "Agent is executing {0}"
   },
   "config_provider": {
     "zh": "服务商",
@@ -103,25 +99,9 @@
     "zh": "额外系统提示词（由纯 C# Agent 合并到最终提示词）",
     "en": "Extra System Prompt (merged by the pure C# Agent)"
   },
-  "config_python_service": {
-    "zh": "C# 运行时",
-    "en": "C# Runtime"
-  },
-  "btn_detect_service": {
-    "zh": "启动/检测",
-    "en": "Start/Detect"
-  },
-  "dialog_env_error": {
-    "zh": "环境异常",
-    "en": "Environment Exception"
-  },
-  "dialog_env_error_msg": {
-    "zh": "C# 智能体运行时不可用。请先修复 Unity 控制台中的编译错误。",
-    "en": "The C# Agent runtime is unavailable. Fix Unity Console compilation errors first."
-  },
-  "dialog_open_wizard": {
-    "zh": "打开向导",
-    "en": "Open Wizard"
+  "btn_environment_check": {
+    "zh": "环境检查",
+    "en": "Environment Check"
   },
   "btn_copy": {
     "zh": "复制",
@@ -143,9 +123,13 @@
     "zh": "显示思考过程",
     "en": "Show reasoning_content"
   },
-  "status_waiting": {
-    "zh": "等待中...",
-    "en": "Waiting..."
+  "toggle_lock_chat_scroll": {
+    "zh": "锁定滚动",
+    "en": "Lock scrolling"
+  },
+  "toggle_lock_chat_scroll_hint": {
+    "zh": "勾选后保留手动滚动位置；取消勾选后自动跟随最新内容",
+    "en": "Keep the manual scroll position when enabled; follow the latest message when disabled"
   },
   "btn_send": {
     "zh": "发送",
@@ -155,149 +139,25 @@
     "zh": "Unity 执行端命令",
     "en": "Unity Execution Commands"
   },
-  "btn_refresh_list": {
-    "zh": "刷新列表",
-    "en": "Refresh List"
+  "btn_execute": {
+    "zh": "执行",
+    "en": "Run"
   },
-  "cmd_search_label": {
-    "zh": "搜索",
-    "en": "Search"
+  "btn_parameters": {
+    "zh": "参数",
+    "en": "Args"
   },
-  "btn_manual_exec": {
-    "zh": "▶ 手动执行",
-    "en": "▶ Execute Manually"
+  "btn_collapse": {
+    "zh": "收起",
+    "en": "Close"
   },
   "err_bridge_not_running": {
     "zh": "[错误] 进程内 AgentBridge 不可用。请先确认控制台没有 C# 编译错误。",
     "en": "[Error] The in-process AgentBridge is unavailable. Fix C# compilation errors in Console first."
   },
-  "err_service_not_running": {
-    "zh": "[错误] 无法启动 C# 智能体，请检查控制台编译错误。",
-    "en": "[Error] Unable to start the C# Agent. Check Console compilation errors."
-  },
-  "msg_session_started": {
-    "zh": "[C# 智能体] 会话已启动：{0}",
-    "en": "[C# Agent] Session started: {0}"
-  },
-  "err_session_start_failed": {
-    "zh": "[错误] C# 智能体未能启动会话：{0}",
-    "en": "[Error] C# Agent failed to start session: {0}"
-  },
-  "err_session_start_exception": {
-    "zh": "[错误] 启动 C# 智能体会话失败：{0}",
-    "en": "[Error] Failed to start C# Agent session: {0}"
-  },
-  "err_poll_timeout": {
-    "zh": "[错误] C# 智能体长时间未推进，已停止界面等待状态。",
-    "en": "[Error] The C# Agent did not advance for a long time. UI waiting stopped."
-  },
-  "msg_session_terminated": {
-    "zh": "[系统] ⏹ 用户手动终止了智能体会话。",
-    "en": "[System] ⏹ Agent session manually terminated by user."
-  },
   "msg_manual_exec_result": {
-    "zh": "[手动执行] {0} → {1}",
-    "en": "[Manual Execution] {0} → {1}"
-  },
-  "wizard_title": {
-    "zh": "AIBridge 环境向导",
-    "en": "AIBridge Environment Wizard"
-  },
-  "wizard_header": {
-    "zh": "🤖 AIBridge 环境配置向导",
-    "en": "🤖 AIBridge Environment Setup Wizard"
-  },
-  "wizard_welcome_status": {
-    "zh": "欢迎使用 AIBridge。开始前将检查 Unity 与纯 C# 运行环境。",
-    "en": "Welcome to AIBridge. Unity and the pure C# runtime will be checked first."
-  },
-  "wizard_checking_status": {
-    "zh": "准备检测 C# 环境...",
-    "en": "Preparing to check the C# environment..."
-  },
-  "wizard_progress_title": {
-    "zh": "配置进度",
-    "en": "Setup Progress"
-  },
-  "wizard_btn_start_check": {
-    "zh": "开始检测环境",
-    "en": "Start Check"
-  },
-  "wizard_btn_wait": {
-    "zh": "请稍候...",
-    "en": "Please wait..."
-  },
-  "wizard_btn_download_python": {
-    "zh": "查看兼容要求",
-    "en": "View Requirements"
-  },
-  "wizard_btn_recheck": {
-    "zh": "重新检测",
-    "en": "Recheck"
-  },
-  "wizard_btn_install_deps": {
-    "zh": "一键安装依赖",
-    "en": "Install Dependencies"
-  },
-  "wizard_btn_skip": {
-    "zh": "跳过",
-    "en": "Skip"
-  },
-  "wizard_btn_open_assistant": {
-    "zh": "打开 AI 助手",
-    "en": "Open AI Assistant"
-  },
-  "wizard_python_not_found": {
-    "zh": "<b><color=red>C# 运行环境未就绪</color></b>\n\n请修复 Unity 编译错误。",
-    "en": "<b><color=red>C# runtime is not ready</color></b>\n\nFix Unity compilation errors."
-  },
-  "wizard_python_not_found_err": {
-    "zh": "建议：\n1. 使用 Unity 2018.4 或更高版本\n2. 修复 Console 中的所有 C# 编译错误\n3. 确认 Library 目录可写",
-    "en": "Suggestions:\n1. Use Unity 2018.4 or newer\n2. Fix all C# Console errors\n3. Ensure Library is writable"
-  },
-  "wizard_detecting_python": {
-    "zh": "正在检测 Unity C# 环境...",
-    "en": "Checking the Unity C# environment..."
-  },
-  "wizard_python_detected": {
-    "zh": "检测到 Unity：<b>{0}</b>\n准备检测工具定义与状态目录...",
-    "en": "Detected Unity: <b>{0}</b>\nChecking tools and state storage..."
-  },
-  "wizard_all_set_status": {
-    "zh": "<b><color=green>纯 C# 环境已就绪！</color></b>\n\n无需外部进程或第三方运行时。",
-    "en": "<b><color=green>Pure C# environment is ready!</color></b>\n\nNo external process or third-party runtime is required."
-  },
-  "wizard_missing_deps": {
-    "zh": "<b><color=#e68a00>C# 环境检查未通过</color></b>。",
-    "en": "<b><color=#e68a00>C# environment check failed</color></b>."
-  },
-  "wizard_missing_deps_err": {
-    "zh": "请修复 Unity 控制台错误后重新检测。",
-    "en": "Fix Unity Console errors and run the check again."
-  },
-  "wizard_installing_deps": {
-    "zh": "正在验证纯 C# 环境，请稍候...",
-    "en": "Validating the pure C# environment..."
-  },
-  "wizard_install_success": {
-    "zh": "<b><color=green>纯 C# 环境验证成功！</color></b>",
-    "en": "<b><color=green>Pure C# environment validated!</color></b>"
-  },
-  "wizard_install_failed": {
-    "zh": "<b><color=red>C# 环境验证失败</color></b>",
-    "en": "<b><color=red>C# environment validation failed</color></b>"
-  },
-  "wizard_install_failed_err": {
-    "zh": "错误信息:\n{0}\n{1}",
-    "en": "Error Message:\n{0}\n{1}"
-  },
-  "wizard_skip_status": {
-    "zh": "<b><color=green>配置完成！</color></b>\n虽然跳过了依赖安装，您仍可以尝试运行智能体。",
-    "en": "<b><color=green>Setup completed!</color></b>\nAlthough dependency installation was skipped, you can still try running the Agent."
-  },
-  "wizard_timeout": {
-    "zh": "操作超时 (可能命令被阻止或弹出窗口)",
-    "en": "Operation timeout (command might be blocked or prompt popped up)"
+    "zh": "[手动执行] {0} => {1}",
+    "en": "[Manual Execution] {0} => {1}"
   },
   "provider_tongyi": {
     "zh": "通义千问",
@@ -311,101 +171,33 @@
     "zh": "自定义",
     "en": "Custom"
   },
-  "step_request_llm": {
-    "zh": "请求大语言模型 (LLM)",
-    "en": "Requesting LLM"
-  },
-  "agent_session_started": {
-    "zh": "智能体会话已启动",
-    "en": "Agent session started"
-  },
-  "step_request_llm_decision": {
-    "zh": "[步骤 {0}/{1}] 请求大语言模型决策",
-    "en": "[Step {0}/{1}] Requesting LLM decision"
-  },
-  "err_no_content_or_tool": {
-    "zh": "[智能体] 模型未返回文本内容，也没有工具调用。",
-    "en": "[Agent] Model returned no content and no tool calls."
-  },
-  "step_call_tool": {
-    "zh": "[步骤 {0}] 🔧 调用工具 `{1}`\n```json\n{2}\n```",
-    "en": "[Step {0}] 🔧 Calling tool `{1}`\n```json\n{2}\n```"
-  },
-  "step_tool_returned": {
-    "zh": "[步骤 {0}] ✅ `{1}` 返回：\n```json\n{2}\n```",
-    "en": "[Step {0}] ✅ `{1}` returned:\n```json\n{2}\n```"
-  },
-  "err_max_steps_reached": {
-    "zh": "[智能体] 已达到最大步骤数 {0}，请检查是否存在循环调用或工具错误。",
-    "en": "[Agent] Max steps {0} reached, please check for infinite loops or tool errors."
-  },
-  "err_bridge_offline": {
-    "zh": "[智能体错误] {0} 进程内 AgentBridge 不可用，已停止本次会话。",
-    "en": "[Agent Error] {0} in-process AgentBridge is unavailable; session stopped."
-  },
-  "err_bridge_offline_during_tool": {
-    "zh": "[智能体错误] {0} 代理桥接器 (AgentBridge) 已离线，本次会话停止，避免继续卡在工具调用。",
-    "en": "[Agent Error] {0} AgentBridge went offline, session stopped to prevent hanging on tool call."
-  },
   "conversation_title": {
     "zh": "会话",
     "en": "Conversation"
-  },
-  "agent_badge": {
-    "zh": "智能体：C#",
-    "en": "Agent: C#"
   },
   "category_all": {
     "zh": "全部",
     "en": "All"
   },
-  "msg_detecting_service": {
-    "zh": "正在检测 C# Agent 与 Unity 执行端...",
-    "en": "Checking C# Agent and Unity command host..."
+  "dialog_environment_check_title": {
+    "zh": "环境检查",
+    "en": "Environment Check"
   },
-  "msg_service_check_failed": {
-    "zh": "C# Agent 检测异常：{0}",
-    "en": "C# Agent check failed: {0}"
+  "environment_check_success": {
+    "zh": "环境检查通过。\n\nUnity：{0}\n状态目录：{1}\n脚本域：{2}\n活动会话：{3}",
+    "en": "Environment check passed.\n\nUnity: {0}\nState directory: {1}\nDomain: {2}\nActive session: {3}"
   },
-  "msg_service_no_response": {
-    "zh": "C# Agent 未能启动。请检查 Unity 控制台编译错误。",
-    "en": "C# Agent failed to start. Check Unity Console compilation errors."
+  "environment_check_failed": {
+    "zh": "环境检查未通过：\n\n{0}",
+    "en": "Environment check failed:\n\n{0}"
   },
-  "msg_bridge_check_failed": {
-    "zh": "Unity 执行端检测异常：{0}",
-    "en": "Unity command bridge check failed: {0}"
+  "value_yes": {
+    "zh": "是",
+    "en": "Yes"
   },
-  "msg_check_completed": {
-    "zh": "检测完成：C# Agent 与 Unity 执行端可用。",
-    "en": "Check completed: C# Agent and Unity command host are available."
-  },
-  "dialog_detect_title": {
-    "zh": "启动 / 检测",
-    "en": "Start / Check"
-  },
-  "dialog_detect_success": {
-    "zh": "检测成功：C# Agent 与 Unity 执行端均可用。",
-    "en": "Success: C# Agent and Unity command host are available."
-  },
-  "msg_bridge_not_ready": {
-    "zh": "C# Agent 已可用，但 Unity 执行端未就绪。",
-    "en": "C# Agent is available, but the Unity command host is not ready."
-  },
-  "dialog_detect_bridge_not_ready": {
-    "zh": "C# Agent 可用，但 Unity 执行端未就绪。详情已写入会话。",
-    "en": "C# Agent is available, but the Unity command host is not ready. Details were added to the session."
-  },
-  "config_title_new": {
-    "zh": "C# 智能体配置",
-    "en": "C# Agent Config"
-  },
-  "config_subtitle": {
-    "zh": "（Unity 进程内直连 LLM，状态可跨脚本重载恢复）",
-    "en": "(Unity calls the LLM in-process and resumes across script reloads)"
-  },
-  "empty_chat_hint": {
-    "zh": "输入任务后，C# Agent 会在这里显示执行过程与结果。",
-    "en": "After entering a task, the C# Agent will display progress and results here."
+  "value_no": {
+    "zh": "否",
+    "en": "No"
   },
   "cmd_panel_subtitle": {
     "zh": "搜索、分类、手动执行 Unity 命令",
@@ -423,49 +215,21 @@
     "zh": "已刷新 Unity 执行命令列表。",
     "en": "Unity command list refreshed."
   },
+  "cmd_no_matches": {
+    "zh": "没有匹配的命令",
+    "en": "No matching commands"
+  },
   "btn_copy_all": {
     "zh": "复制全文",
     "en": "Copy All"
   },
-  "templates_title": {
-    "zh": "快捷指令:",
-    "en": "Templates:"
+  "config_title": {
+    "zh": "模型与执行设置",
+    "en": "Model and Execution Settings"
   },
-  "template_create_cube": {
-    "zh": "创建立方体",
-    "en": "Create Cube"
-  },
-  "template_check_hierarchy": {
-    "zh": "检查层级",
-    "en": "Check Scene"
-  },
-  "template_clean_scene": {
-    "zh": "清理场景",
-    "en": "Clean Scene"
-  },
-  "template_create_script": {
-    "zh": "生成脚本",
-    "en": "Create Script"
-  },
-  "agent_badge_csharp": {
-    "zh": "智能体：C#",
-    "en": "Agent: C#"
-  },
-  "msg_detecting_csharp": {
-    "zh": "正在检测进程内 C# Agent、工具定义与持久化目录...",
-    "en": "Checking the in-process C# Agent, tools, and persistent state..."
-  },
-  "config_title_csharp": {
-    "zh": "C# 智能体配置",
-    "en": "C# Agent Config"
-  },
-  "config_subtitle_csharp": {
-    "zh": "（Unity 进程内直连 LLM，状态可跨脚本重载恢复）",
-    "en": "(In-process LLM calls with script-reload recovery)"
-  },
-  "config_csharp_runtime": {
-    "zh": "C# 运行时",
-    "en": "C# Runtime"
+  "config_subtitle": {
+    "zh": "连接、模型与执行权限",
+    "en": "Connection, model, and execution permissions"
   },
   "config_execute_generated": {
     "zh": "执行生成代码",
